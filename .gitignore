@@ -1,0 +1,25 @@
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# Segredos / configuração local
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# IDEs / editores
+.vscode/
+.idea/
+*.swp
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
