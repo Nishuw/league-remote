@@ -82,19 +82,43 @@ function rowHtml(p) {
     ? '<img src="' + champIcon(p.champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
     : '<div class="noimg"></div>';
   let name;
-  if (p.champion) name = '<div class="cname">' + p.champion + '</div>';
-  else if (p.picking) name = '<div class="cname empty">escolhendo...</div>';
-  else name = '<div class="cname empty">--</div>';
+  if (p.champion) name = '<span class="cname">' + p.champion + '</span>';
+  else if (p.picking) name = '<span class="cname empty">escolhendo...</span>';
+  else name = '<span class="cname empty">--</span>';
+  const tag = p.is_local ? '<span class="metag">VOCE</span>' : '';
   let sub = "";
-  if (p.name) sub = '<div class="pos">' + p.name + '</div>';
-  else if (p.position) sub = '<div class="pos">' + (POS_PT[p.position] || p.position) + '</div>';
-  return '<div class="' + cls + '">' + icon + '<div class="info">' + name + sub + '</div></div>';
+  if (p.position) sub += '<span class="posb">' + (POS_PT[p.position] || p.position) + '</span>';
+  if (p.name) sub += '<span class="sname">' + p.name + '</span>';
+  return '<div class="' + cls + '">' +
+    '<div class="ava">' + icon + '</div>' +
+    '<div class="info">' +
+      '<div class="cline">' + name + tag + '</div>' +
+      (sub ? '<div class="pos">' + sub + '</div>' : '') +
+    '</div></div>';
 }
 
-function bansHtml(label, bans) {
-  let imgs = bans.map(b => '<img src="' + champIcon(b.champion_id) + '" title="' + (b.champion || '') + '" onerror="this.style.display=\'none\'">').join("");
-  if (!imgs) imgs = '<span class="pos">nenhum</span>';
-  return '<div class="bans"><span class="lbl">' + label + '</span>' + imgs + '</div>';
+function turnBanner(cs) {
+  let cls = "turnbanner", txt = "";
+  if (cs.current_actor_cell != null) {
+    const mine = cs.current_actor_cell === cs.local_cell;
+    const isBan = cs.current_action_type === "ban";
+    cls += (mine ? " mine" : "") + (isBan ? " ban" : "");
+    txt = mine ? "SUA VEZ DE " + (isBan ? "BANIR" : "ESCOLHER") : "Vez de " + (isBan ? "banir" : "escolher") + "...";
+  } else if (cs.time_left) {
+    txt = "Selecao de campeao";
+  }
+  if (!txt) return "";
+  const timer = cs.time_left ? '<span class="turntimer">' + cs.time_left + 's</span>' : "";
+  return '<div class="' + cls + '"><span>' + txt + '</span>' + timer + '</div>';
+}
+
+function bansBar(cs) {
+  const slot = b => '<div class="banslot filled"><img src="' + champIcon(b.champion_id) +
+    '" title="' + (b.champion || "") + '" onerror="this.style.visibility=\'hidden\'"></div>';
+  const side = (label, bans, cls) =>
+    '<div class="banside ' + cls + '"><span class="banlbl">' + label + '</span>' +
+    '<div class="banrow">' + (bans.length ? bans.map(slot).join("") : '<span class="noban">nenhum</span>') + '</div></div>';
+  return '<div class="bansbar">' + side("Bans aliados", cs.my_bans, "ally") + side("Bans inimigos", cs.their_bans, "enemy") + '</div>';
 }
 
 function teamsHtml(cs) {
@@ -177,22 +201,7 @@ function renderAram(cs) {
 
 function renderChamp(cs) {
   if (cs.mode === "bench") return renderAram(cs);
-  let turn = "";
-  if (cs.current_actor_cell != null) {
-    const mine = cs.current_actor_cell === cs.local_cell;
-    const act = cs.current_action_type === "ban" ? "banir" : "escolher";
-    turn = mine
-      ? '<b>SUA VEZ</b> de ' + act + '! (' + cs.time_left + 's)'
-      : 'Vez de ' + act + '... (' + cs.time_left + 's)';
-  } else if (cs.time_left) {
-    turn = 'Tempo: ' + cs.time_left + 's';
-  }
-  return (
-    '<div class="turn">' + turn + '</div>' +
-    teamsHtml(cs) +
-    bansHtml("Bans aliados", cs.my_bans) +
-    bansHtml("Bans inimigos", cs.their_bans)
-  );
+  return turnBanner(cs) + bansBar(cs) + teamsHtml(cs);
 }
 
 let csActionId = undefined;
@@ -250,10 +259,8 @@ async function loadChampControls(cs) {
     const isBan = data.type === "ban";
     const verb = isBan ? "BANIR" : "TRAVAR";
     ctr.innerHTML =
-      '<div class="pickbar">' +
-        '<input id="champ-search" placeholder="buscar campeao..." oninput="filterChamps()">' +
-        '<button class="lockbtn ' + (isBan ? "ban" : "") + '" id="lockbtn" onclick="doLock()">' + verb + '</button>' +
-      '</div>' +
+      '<div class="pickhead">' + (isBan ? "Quem voce quer banir?" : "Escolha seu campeao") + '</div>' +
+      '<input id="champ-search" placeholder="buscar campeao..." oninput="filterChamps()">' +
       '<div class="grid" id="champ-grid">' +
         data.champions.map(c =>
           '<div class="gitem" data-name="' + c.name.toLowerCase() + '" data-id="' + c.id + '" onclick="selectChamp(' + c.id + ')">' +
@@ -261,7 +268,8 @@ async function loadChampControls(cs) {
             '<span>' + c.name + '</span>' +
           '</div>'
         ).join("") +
-      '</div>';
+      '</div>' +
+      '<button class="lockbtn ' + (isBan ? "ban" : "") + ' lockfull" id="lockbtn" onclick="doLock()">' + verb + '</button>';
   } catch (e) {
     ctr.innerHTML = '<div class="loading">erro ao carregar campeoes</div>';
     csActionId = undefined;
@@ -529,17 +537,53 @@ async function loadLive() {
     const mins = Math.floor(d.game_time / 60), secs = d.game_time % 60;
     const teams = { ORDER: [], CHAOS: [] };
     d.players.forEach(p => { (teams[p.team] || (teams[p.team] = [])).push(p); });
-    const teamHtml = (arr, cls, title) =>
-      '<div class="lteam ' + cls + '"><h4>' + title + '</h4>' +
-      arr.map(p =>
-        '<div class="lprow"><span class="lc">' + (p.champion || p.name || "?") + '</span>' +
+    const obj = d.objectives || {};
+    const tk = d.team_kills || {};
+
+    const objLine = (t) => {
+      const o = obj[t] || {};
+      let s = '<span class="ob k">' + (tk[t] || 0) + ' abates</span>' +
+              '<span class="ob">' + (o.towers || 0) + ' torres</span>' +
+              '<span class="ob">' + (o.dragons || 0) + ' dragoes</span>';
+      if (o.barons) s += '<span class="ob">' + o.barons + ' barao</span>';
+      return s;
+    };
+
+    const prow = (p) => {
+      const icon = p.champion_id
+        ? '<img src="' + champIcon(p.champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
+        : '';
+      const status = p.dead
+        ? '<span class="ldead">morto ' + p.respawn + 's</span>'
+        : '';
+      return '<div class="lprow' + (p.dead ? ' isdead' : '') + '">' +
+        '<div class="lpava">' + icon + '<span class="llvl">' + (p.level || 0) + '</span></div>' +
+        '<span class="lc">' + (p.champion || p.name || "?") + status + '</span>' +
         '<span class="lk">' + p.k + '/' + p.d + '/' + p.a + '</span>' +
-        '<span class="lcs">' + p.cs + ' cs</span></div>'
-      ).join("") + '</div>';
-    live.innerHTML =
-      '<div class="gt">' + mins + ':' + String(secs).padStart(2, "0") + '</div>' +
-      teamHtml(teams.ORDER || [], "ally", "Time Azul") +
-      teamHtml(teams.CHAOS || [], "enemy", "Time Vermelho");
+        '<span class="lcs">' + p.cs + ' cs</span>' +
+        '</div>';
+    };
+
+    const teamBlock = (arr, cls, title, tkey) =>
+      '<div class="lteam ' + cls + '">' +
+        '<div class="lthead"><h4>' + title + '</h4><div class="lobj">' + objLine(tkey) + '</div></div>' +
+        arr.map(prow).join("") +
+      '</div>';
+
+    let h = '<div class="lhead"><span class="gt">' + mins + ':' + String(secs).padStart(2, "0") + '</span>';
+    if (d.map) h += '<span class="lmode">' + d.map + '</span>';
+    if (d.your_gold != null) h += '<span class="lgold">' + d.your_gold + ' ouro</span>';
+    h += '</div>';
+    h += teamBlock(teams.ORDER || [], "ally", "Time Azul", "ORDER");
+    h += teamBlock(teams.CHAOS || [], "enemy", "Time Vermelho", "CHAOS");
+    if (Array.isArray(d.feed) && d.feed.length) {
+      h += '<div class="lfeed"><div class="lfeed-t">Eventos</div>' +
+        d.feed.slice().reverse().map(e => {
+          const m = Math.floor((e.t || 0) / 60), s = Math.floor((e.t || 0) % 60);
+          return '<div class="lfeed-row"><span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' + e.txt + '</div>';
+        }).join("") + '</div>';
+    }
+    live.innerHTML = h;
   } catch (e) {
     document.getElementById("live").innerHTML = '<div class="loading">sem dados ao vivo (ative a API no jogo)</div>';
   }
@@ -668,16 +712,19 @@ async function tick() {
     }
     phaseEl.textContent = phaseTxt;
 
-    // ARAM: Desordem nao tem runas (usa aprimoramentos) -> esconde o painel.
+    // Em jogo a tela e so leitura: esconde Auto-pick/ban e Runas.
+    // ARAM: Desordem tambem nao tem runas (usa aprimoramentos).
+    const inGame = s.phase === "InProgress";
+    const cfgBtn = document.getElementById("cfgbtn");
+    if (cfgBtn) {
+      cfgBtn.style.display = inGame ? "none" : "";
+      if (inGame) { const cp = document.getElementById("cfg-panel"); if (cp) cp.hidden = true; }
+    }
     const runesBtn = document.getElementById("runesbtn");
     if (runesBtn) {
-      if (s.runes_enabled === false) {
-        runesBtn.style.display = "none";
-        const rp = document.getElementById("runes-panel");
-        if (rp) rp.hidden = true;
-      } else {
-        runesBtn.style.display = "";
-      }
+      const hideRunes = inGame || s.runes_enabled === false;
+      runesBtn.style.display = hideRunes ? "none" : "";
+      if (hideRunes) { const rp = document.getElementById("runes-panel"); if (rp) rp.hidden = true; }
     }
 
     const btn = document.getElementById("accept");

@@ -309,23 +309,90 @@ def create_app(monitor: Monitor) -> Flask:
         if not data:
             return jsonify({"in_game": False})
         game = data.get("gameData", {}) or {}
+        client.load_champion_data()
+        name_to_id = {v: k for k, v in client.champ_map.items()}
+
+        champ_team = {}
         players = []
+        team_kills = {"ORDER": 0, "CHAOS": 0}
         for p in data.get("allPlayers", []) or []:
             sc = p.get("scores", {}) or {}
+            team = p.get("team")
+            cname = p.get("championName")
+            champ_team[cname] = team
+            if team in team_kills:
+                team_kills[team] += int(sc.get("kills", 0) or 0)
             players.append({
                 "name": p.get("riotIdGameName") or p.get("summonerName"),
-                "champion": p.get("championName"),
-                "team": p.get("team"),
+                "champion": cname,
+                "champion_id": name_to_id.get(cname),
+                "team": team,
                 "k": sc.get("kills", 0),
                 "d": sc.get("deaths", 0),
                 "a": sc.get("assists", 0),
                 "cs": sc.get("creepScore", 0),
+                "wards": sc.get("wardScore", 0),
                 "level": p.get("level", 0),
+                "dead": bool(p.get("isDead")),
+                "respawn": int(p.get("respawnTimer", 0) or 0),
+                "position": (p.get("position") or "").lower(),
             })
+
+        # Objetivos e feed a partir dos eventos da partida
+        objectives = {
+            "ORDER": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "inhibs": 0},
+            "CHAOS": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "inhibs": 0},
+        }
+        feed = []
+        for ev in (data.get("events", {}) or {}).get("Events", []) or []:
+            name = ev.get("EventName")
+            killer = ev.get("KillerName")
+            t = int(ev.get("EventTime", 0) or 0)
+            if name == "TurretKilled":
+                tk = ev.get("TurretKilled", "")
+                if "_T1_" in tk:
+                    objectives["CHAOS"]["towers"] += 1
+                elif "_T2_" in tk:
+                    objectives["ORDER"]["towers"] += 1
+            elif name == "InhibKilled":
+                ik = ev.get("InhibKilled", "")
+                if "_T1_" in ik:
+                    objectives["CHAOS"]["inhibs"] += 1
+                elif "_T2_" in ik:
+                    objectives["ORDER"]["inhibs"] += 1
+            elif name == "DragonKill":
+                team = champ_team.get(killer)
+                if team in objectives:
+                    objectives[team]["dragons"] += 1
+                dt = ev.get("DragonType")
+                feed.append({"t": t, "txt": f"{killer or '?'} matou o Dragao" + (f" {dt}" if dt else "")})
+            elif name == "HeraldKill":
+                team = champ_team.get(killer)
+                if team in objectives:
+                    objectives[team]["heralds"] += 1
+                feed.append({"t": t, "txt": f"{killer or '?'} matou o Arauto"})
+            elif name == "BaronKill":
+                team = champ_team.get(killer)
+                if team in objectives:
+                    objectives[team]["barons"] += 1
+                feed.append({"t": t, "txt": f"{killer or '?'} matou o Barao"})
+            elif name == "FirstBlood":
+                feed.append({"t": t, "txt": "Primeiro abate (First Blood)"})
+            elif name == "Ace":
+                feed.append({"t": t, "txt": "ACE!"})
+
+        active = data.get("activePlayer", {}) or {}
+        gold = active.get("currentGold") if isinstance(active, dict) else None
+
         return jsonify({
             "in_game": True,
             "game_time": int(game.get("gameTime", 0) or 0),
             "mode": game.get("gameMode"),
+            "map": game.get("mapName"),
+            "team_kills": team_kills,
+            "objectives": objectives,
+            "your_gold": int(gold) if isinstance(gold, (int, float)) else None,
+            "feed": feed[-6:],
             "players": players,
         })
 
