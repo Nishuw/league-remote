@@ -96,6 +96,42 @@ def create_app(monitor: Monitor) -> Flask:
             monitor.set_last_action(f"{verb} pelo celular")
         return jsonify({"ok": ok})
 
+    @app.route("/aram/reroll", methods=["POST"])
+    def aram_reroll():
+        ok = client.reroll()
+        monitor.set_last_action("Reroll pelo celular" if ok else "Falha no reroll")
+        return jsonify({"ok": ok})
+
+    @app.route("/aram/swap", methods=["POST"])
+    def aram_swap():
+        data = request.get_json(force=True, silent=True) or {}
+        champion_id = data.get("championId")
+        if champion_id is None:
+            return jsonify({"ok": False, "error": "championId ausente"})
+        ok = client.bench_swap(int(champion_id))
+        monitor.set_last_action(
+            f"Trocou pelo banco: {client.champ_name(int(champion_id)) or champion_id}"
+            if ok else "Falha ao trocar pelo banco"
+        )
+        return jsonify({"ok": ok})
+
+    @app.route("/aram/trade", methods=["POST"])
+    def aram_trade():
+        data = request.get_json(force=True, silent=True) or {}
+        trade_id = data.get("id")
+        action = (data.get("action") or "").lower()
+        if trade_id is None or action not in ("request", "accept", "decline"):
+            return jsonify({"ok": False, "error": "parametros invalidos"})
+        fn = {
+            "request": client.trade_request,
+            "accept": client.trade_accept,
+            "decline": client.trade_decline,
+        }[action]
+        ok = fn(int(trade_id))
+        labels = {"request": "Troca oferecida", "accept": "Troca aceita", "decline": "Troca recusada"}
+        monitor.set_last_action(labels[action] if ok else "Falha na troca")
+        return jsonify({"ok": ok})
+
     @app.route("/champ-list")
     def champ_list():
         client.load_champion_data()
@@ -301,13 +337,12 @@ def create_app(monitor: Monitor) -> Flask:
     def config():
         if request.method == "POST":
             data = request.get_json(force=True, silent=True) or {}
-            for key in ("auto_pick_enabled", "auto_ban_enabled"):
+            for key in ("auto_pick_enabled", "auto_ban_enabled", "ban_protect_allies"):
                 if key in data:
                     monitor.config[key] = bool(data[key])
-            for key in ("auto_pick_champ", "auto_ban_champ"):
+            for key in ("auto_pick_champs", "auto_ban_champs"):
                 if key in data:
-                    val = data[key]
-                    monitor.config[key] = int(val) if val else None
+                    monitor.config[key] = Monitor._as_id_list(data[key])
             monitor.set_last_action("Config de auto-pick/ban atualizada")
         return jsonify(monitor.config)
 

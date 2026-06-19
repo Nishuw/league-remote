@@ -97,7 +97,86 @@ function bansHtml(label, bans) {
   return '<div class="bans"><span class="lbl">' + label + '</span>' + imgs + '</div>';
 }
 
+function teamsHtml(cs) {
+  return '<div class="teams">' +
+    '<div class="team ally"><h3>Seu time</h3>' + cs.my_team.map(rowHtml).join("") + '</div>' +
+    '<div class="team enemy"><h3>Inimigos</h3>' + cs.their_team.map(rowHtml).join("") + '</div>' +
+  '</div>';
+}
+
+// ---- ARAM: campeao sorteado, reroll, banco de reserva e trocas ----
+async function reroll() {
+  try { await fetch("/aram/reroll", { method: "POST" }); } catch (e) {}
+}
+async function benchSwap(id) {
+  try {
+    await fetch("/aram/swap", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ championId: id })
+    });
+  } catch (e) {}
+}
+async function tradeAction(id, action) {
+  try {
+    await fetch("/aram/trade", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, action })
+    });
+  } catch (e) {}
+}
+
+function tradeButtons(t) {
+  if (t.state === "RECEIVED") {
+    return '<button class="tradebtn ok" onclick="tradeAction(' + t.id + ',\'accept\')">Aceitar</button>' +
+           '<button class="tradebtn no" onclick="tradeAction(' + t.id + ',\'decline\')">Recusar</button>';
+  }
+  if (t.state === "SENT") return '<span class="trade-state">enviado...</span>';
+  if (t.state === "AVAILABLE") return '<button class="tradebtn" onclick="tradeAction(' + t.id + ',\'request\')">Pedir troca</button>';
+  return '<span class="trade-state">' + String(t.state || "").toLowerCase() + '</span>';
+}
+
+function renderAram(cs) {
+  const myIcon = cs.my_champion_id
+    ? '<img class="aram-champ" src="' + champIcon(cs.my_champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
+    : '<div class="aram-champ noimg"></div>';
+  const canReroll = cs.rerolls > 0 ? "" : "disabled";
+  let h =
+    '<div class="aram-current">' + myIcon +
+      '<div class="aram-meta">' +
+        '<div class="aram-name">' + (cs.my_champion || "sorteando...") + '</div>' +
+        '<button class="rerollbtn" ' + canReroll + ' onclick="reroll()">&#8635; Reroll (' + cs.rerolls + ')</button>' +
+      '</div>' +
+    '</div>';
+
+  h += '<div class="aram-sec">Banco de reserva</div>';
+  if (cs.bench && cs.bench.length) {
+    h += '<div class="bench-grid">' + cs.bench.map(b =>
+      '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
+        '<img src="' + champIcon(b.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
+        '<span>' + (b.champion || "?") + '</span>' +
+      '</div>'
+    ).join("") + '</div>';
+  } else {
+    h += '<div class="muted" style="font-size:12px">banco vazio</div>';
+  }
+
+  if (cs.trades && cs.trades.length) {
+    h += '<div class="aram-sec">Trocas com aliados</div>';
+    h += cs.trades.map(t =>
+      '<div class="traderow">' +
+        '<img src="' + champIcon(t.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
+        '<span class="tradewho">' + (t.champion || "?") + (t.name ? ' (' + t.name + ')' : '') + '</span>' +
+        tradeButtons(t) +
+      '</div>'
+    ).join("");
+  }
+
+  h += '<div class="aram-sec">Composicao</div>' + teamsHtml(cs);
+  return h;
+}
+
 function renderChamp(cs) {
+  if (cs.mode === "bench") return renderAram(cs);
   let turn = "";
   if (cs.current_actor_cell != null) {
     const mine = cs.current_actor_cell === cs.local_cell;
@@ -110,10 +189,7 @@ function renderChamp(cs) {
   }
   return (
     '<div class="turn">' + turn + '</div>' +
-    '<div class="teams">' +
-      '<div class="team ally"><h3>Seu time</h3>' + cs.my_team.map(rowHtml).join("") + '</div>' +
-      '<div class="team enemy"><h3>Inimigos</h3>' + cs.their_team.map(rowHtml).join("") + '</div>' +
-    '</div>' +
+    teamsHtml(cs) +
     bansHtml("Bans aliados", cs.my_bans) +
     bansHtml("Bans inimigos", cs.their_bans)
   );
@@ -127,9 +203,22 @@ function ensureChampLayout() {
   if (!document.getElementById("champ-info")) {
     champ.innerHTML =
       '<div id="champ-info"></div>' +
-      '<div id="champ-controls"></div>' +
-      '<div id="runes-area"></div>';
-    loadRunes();
+      '<div id="champ-controls"></div>';
+  }
+}
+
+// Painel de runas acessivel a qualquer momento (fila, menu, champ select).
+function toggleRunesPanel() {
+  const panel = document.getElementById("runes-panel");
+  if (panel.hidden) {
+    panel.hidden = false;
+    if (!panel.dataset.init) {
+      panel.dataset.init = "1";
+      panel.innerHTML = '<div id="runes-area"></div>';
+      loadRunes();
+    }
+  } else {
+    panel.hidden = true;
   }
 }
 
@@ -143,6 +232,11 @@ function resetChampLayout() {
 async function loadChampControls(cs) {
   const ctr = document.getElementById("champ-controls");
   if (!ctr) return;
+  if (cs.mode === "bench") {
+    // ARAM nao tem grade de pick/ban; tudo fica em renderAram.
+    if (ctr.innerHTML !== "") { ctr.innerHTML = ""; csActionId = undefined; csSelected = null; }
+    return;
+  }
   if (!cs.is_my_turn) {
     if (csActionId !== undefined) { ctr.innerHTML = ""; csActionId = undefined; csSelected = null; }
     return;
@@ -503,24 +597,51 @@ function champOptions(selected) {
     champListCache.map(c => '<option value="' + c.id + '"' + (c.id === selected ? " selected" : "") + '>' + c.name + '</option>').join("");
 }
 
+const PRIORITY_LABELS = ["1a opcao", "2a opcao", "3a opcao"];
+
+function prioritySelects(prefix, list) {
+  list = list || [];
+  let h = "";
+  for (let i = 0; i < PRIORITY_LABELS.length; i++) {
+    h += '<div class="cfg-prio-row"><span class="cfg-prio-n">' + PRIORITY_LABELS[i] + '</span>' +
+      '<select id="' + prefix + '-' + i + '" onchange="saveConfig()">' + champOptions(list[i] != null ? list[i] : null) + '</select></div>';
+  }
+  return h;
+}
+
+function collectPriority(prefix) {
+  const out = [];
+  for (let i = 0; i < PRIORITY_LABELS.length; i++) {
+    const el = document.getElementById(prefix + "-" + i);
+    const v = el && el.value ? parseInt(el.value) : null;
+    if (v && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
 function renderConfig(cfg) {
   const panel = document.getElementById("cfg-panel");
   panel.innerHTML =
     '<div class="cfg-row"><label>Auto-pick</label>' +
       '<label class="switch"><input type="checkbox" id="cfg-pick-on" ' + (cfg.auto_pick_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
-    '<div class="cfg-row"><label>Campeao</label><select id="cfg-pick-champ" onchange="saveConfig()">' + champOptions(cfg.auto_pick_champ) + '</select></div>' +
+    '<div class="cfg-sub">Campeoes (ordem de prioridade)</div>' +
+    '<div class="cfg-priority">' + prioritySelects("cfg-pick", cfg.auto_pick_champs) + '</div>' +
     '<div class="cfg-row"><label>Auto-ban</label>' +
       '<label class="switch"><input type="checkbox" id="cfg-ban-on" ' + (cfg.auto_ban_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
-    '<div class="cfg-row"><label>Campeao</label><select id="cfg-ban-champ" onchange="saveConfig()">' + champOptions(cfg.auto_ban_champ) + '</select></div>' +
-    '<div class="muted" style="font-size:11px;margin-top:6px">Trava automaticamente na sua vez. O alarme/aceitar continua valendo.</div>';
+    '<div class="cfg-sub">Campeoes (ordem de prioridade)</div>' +
+    '<div class="cfg-priority">' + prioritySelects("cfg-ban", cfg.auto_ban_champs) + '</div>' +
+    '<div class="cfg-row"><label>Nao banir pick de aliado</label>' +
+      '<label class="switch"><input type="checkbox" id="cfg-protect" ' + (cfg.ban_protect_allies ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
+    '<div class="muted" style="font-size:11px;margin-top:6px">Tenta na ordem e pula quem ja foi banido/escolhido. Se nenhum estiver disponivel, a selecao manual aparece na sua vez.</div>';
 }
 
 async function saveConfig() {
   const body = {
     auto_pick_enabled: document.getElementById("cfg-pick-on").checked,
     auto_ban_enabled: document.getElementById("cfg-ban-on").checked,
-    auto_pick_champ: document.getElementById("cfg-pick-champ").value || null,
-    auto_ban_champ: document.getElementById("cfg-ban-champ").value || null,
+    ban_protect_allies: document.getElementById("cfg-protect").checked,
+    auto_pick_champs: collectPriority("cfg-pick"),
+    auto_ban_champs: collectPriority("cfg-ban"),
   };
   try { await fetch("/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); } catch (e) {}
 }

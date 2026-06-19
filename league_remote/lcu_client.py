@@ -186,6 +186,30 @@ class LCUClient:
         )
 
     # ------------------------------------------------------------------
+    # ARAM: banco de reserva, reroll e trocas
+    # ------------------------------------------------------------------
+
+    def reroll(self) -> bool:
+        """Re-rola (reroll) o campeao sorteado no ARAM."""
+        return self._post("/lol-champ-select/v1/session/my-selection/reroll")
+
+    def bench_swap(self, champion_id: int) -> bool:
+        """Troca o campeao atual por um do banco de reserva (ARAM)."""
+        return self._post(f"/lol-champ-select/v1/session/bench/swap/{int(champion_id)}")
+
+    def trade_request(self, trade_id: int) -> bool:
+        """Oferece troca de campeao a um aliado."""
+        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/request")
+
+    def trade_accept(self, trade_id: int) -> bool:
+        """Aceita uma troca de campeao recebida."""
+        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/accept")
+
+    def trade_decline(self, trade_id: int) -> bool:
+        """Recusa uma troca de campeao recebida."""
+        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/decline")
+
+    # ------------------------------------------------------------------
     # Runas
     # ------------------------------------------------------------------
 

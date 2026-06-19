@@ -40,9 +40,12 @@ class Monitor:
         }
         self.config: Dict[str, Any] = {
             "auto_pick_enabled": False,
-            "auto_pick_champ": None,
+            # Lista de campeoes em ordem de prioridade (tenta o 1o disponivel).
+            "auto_pick_champs": [],
             "auto_ban_enabled": False,
-            "auto_ban_champ": None,
+            "auto_ban_champs": [],
+            # Nao banir um campeao que um aliado esta escolhendo (pick intent).
+            "ban_protect_allies": True,
         }
         self._auto_accepted_this_check = False
         self._auto_acted_actions: set = set()
@@ -134,7 +137,7 @@ class Monitor:
         timer = session.get("timer", {}) or {}
         time_left = int((timer.get("adjustedTimeLeftInPhase", 0) or 0) / 1000)
 
-        return {
+        result = {
             "phase": timer.get("phase"),
             "time_left": max(0, time_left),
             "current_actor_cell": current_actor,
@@ -147,22 +150,138 @@ class Monitor:
             "their_team": build_team("theirTeam"),
             "my_bans": my_bans,
             "their_bans": their_bans,
+            # "draft" (pick/ban por vez) ou "bench" (ARAM: sorteio + banco + troca)
+            "mode": "bench" if session.get("benchEnabled") else "draft",
         }
 
+        if result["mode"] == "bench":
+            result.update(self._build_bench(session, local_cell))
+        return result
+
+    def _build_bench(self, session: Dict[str, Any], local_cell: Any) -> Dict[str, Any]:
+        """Dados do ARAM: campeao atual, banco de reserva, rerolls e trocas."""
+        client = self.client
+
+        # Mapas por celula para resolver campeao/invocador nas trocas
+        cell_champ: Dict[Any, int] = {}
+        cell_sid: Dict[Any, int] = {}
+        my_champion_id = 0
+        for p in session.get("myTeam", []) or []:
+            cell = p.get("cellId")
+            cell_champ[cell] = p.get("championId") or 0
+            cell_sid[cell] = p.get("summonerId")
+            if cell == local_cell:
+                my_champion_id = p.get("championId") or 0
+
+        bench = [
+            {"champion_id": c.get("championId"), "champion": client.champ_name(c.get("championId"))}
+            for c in session.get("benchChampions", []) or []
+            if c.get("championId")
+        ]
+
+        trades = []
+        for t in session.get("trades", []) or []:
+            cell = t.get("cellId")
+            state = t.get("state")
+            if cell is None or cell == local_cell or state in (None, "INVALID"):
+                continue
+            sid = cell_sid.get(cell)
+            name = None
+            if sid:
+                summ = client.get_summoner_by_id(sid)
+                if summ:
+                    name = summ.get("gameName") or summ.get("displayName")
+            champ_id = cell_champ.get(cell) or 0
+            trades.append({
+                "id": t.get("id"),
+                "state": state,  # AVAILABLE, SENT, RECEIVED, BUSY...
+                "name": name,
+                "champion_id": champ_id or None,
+                "champion": client.champ_name(champ_id),
+            })
+
+        return {
+            "my_champion_id": my_champion_id or None,
+            "my_champion": client.champ_name(my_champion_id),
+            "bench": bench,
+            "rerolls": int(session.get("rerollsRemaining", 0) or 0),
+            "trades": trades,
+        }
+
+    @staticmethod
+    def _as_id_list(value: Any) -> list:
+        """Normaliza a config para uma lista de ids inteiros e validos."""
+        out = []
+        for v in value or []:
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                continue
+            if iv > 0 and iv not in out:
+                out.append(iv)
+        return out
+
+    def _choose_pick(self, prefs: list) -> Optional[int]:
+        """Primeiro campeao da lista que esteja disponivel para pick."""
+        prefs = self._as_id_list(prefs)
+        if not prefs:
+            return None
+        pickable = set(self.client.get_pickable_champion_ids() or [])
+        for cid in prefs:
+            # Se a LCU nao devolveu a lista, tentamos mesmo assim (cliente decide).
+            if not pickable or cid in pickable:
+                return cid
+        return None
+
+    def _choose_ban(self, prefs: list, cs: Dict[str, Any]) -> Optional[int]:
+        """Primeiro campeao da lista banivel, respeitando o pick dos aliados."""
+        prefs = self._as_id_list(prefs)
+        if not prefs:
+            return None
+        bannable = set(self.client.get_bannable_champion_ids() or [])
+        protected = set()
+        if self.config.get("ban_protect_allies"):
+            for p in cs.get("my_team", []) or []:
+                if not p.get("is_local") and p.get("champion_id"):
+                    protected.add(int(p["champion_id"]))
+        for cid in prefs:
+            if cid in protected:
+                continue
+            if not bannable or cid in bannable:
+                return cid
+        return None
+
     def _maybe_auto_act(self, cs: Dict[str, Any]) -> None:
-        """Auto-pick / auto-ban quando for a vez do jogador."""
+        """Auto-pick / auto-ban quando for a vez do jogador.
+
+        Protecoes: so age na acao em progresso do jogador, valida contra os
+        campeoes disponiveis (pickable/bannable), tenta a lista de prioridade
+        em ordem e nao bane o pick de um aliado. Em caso de falha, nao marca a
+        acao como concluida, entao tenta de novo no proximo ciclo e mantem a
+        selecao manual disponivel.
+        """
         action_id = cs.get("my_action_id")
         atype = cs.get("my_action_type")
         if not action_id or action_id in self._auto_acted_actions:
             return
         cfg = self.config
-        if atype == "pick" and cfg.get("auto_pick_enabled") and cfg.get("auto_pick_champ"):
-            champ_id = int(cfg["auto_pick_champ"])
+
+        if atype == "pick" and cfg.get("auto_pick_enabled"):
+            champ_id = self._choose_pick(cfg.get("auto_pick_champs"))
+            if champ_id is None:
+                if cfg.get("auto_pick_champs"):
+                    self.set_last_action("Auto-pick: nenhum campeao disponivel, escolha manual")
+                return
             if self.client.patch_action(action_id, champ_id, True):
                 self._auto_acted_actions.add(action_id)
                 self.set_last_action(f"Auto-pick: {self.client.champ_name(champ_id) or champ_id}")
-        elif atype == "ban" and cfg.get("auto_ban_enabled") and cfg.get("auto_ban_champ"):
-            champ_id = int(cfg["auto_ban_champ"])
+
+        elif atype == "ban" and cfg.get("auto_ban_enabled"):
+            champ_id = self._choose_ban(cfg.get("auto_ban_champs"), cs)
+            if champ_id is None:
+                if cfg.get("auto_ban_champs"):
+                    self.set_last_action("Auto-ban: nenhum campeao disponivel/permitido")
+                return
             if self.client.patch_action(action_id, champ_id, True):
                 self._auto_acted_actions.add(action_id)
                 self.set_last_action(f"Auto-ban: {self.client.champ_name(champ_id) or champ_id}")
