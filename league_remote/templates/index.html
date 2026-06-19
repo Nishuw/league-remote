@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="LoL Remote">
+<title>League Remote</title>
+<link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>LEAGUE REMOTE</h1>
+    <div class="sub"><span id="conn-dot" class="dot off"></span><span id="conn">conectando...</span></div>
+  </header>
+
+  <main class="app">
+    <div class="card" id="card">
+      <div class="status" id="phase">--</div>
+      <div id="content">
+        <div class="queue" id="queue">--</div>
+        <div class="muted" id="queue-label">tempo de fila</div>
+        <button class="leavebtn" id="leavebtn" onclick="leaveQueue()">Sair da fila</button>
+        <div id="idle-extra"></div>
+      </div>
+      <div class="champ" id="champ"></div>
+      <div class="live" id="live"></div>
+    </div>
+
+    <button class="cfgbtn" id="cfgbtn" onclick="toggleConfig()">&#9881; Auto-pick / Auto-ban</button>
+    <div class="cfg-panel" id="cfg-panel" hidden></div>
+    <div class="foot" id="foot"></div>
+  </main>
+
+  <div class="actionbar" id="actionbar" hidden>
+    <button class="declinebtn" id="declinebtn" onclick="decline()">Recusar</button>
+    <button class="accept" id="accept" onclick="accept()">ACEITAR</button>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

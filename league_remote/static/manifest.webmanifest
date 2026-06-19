@@ -1,0 +1,11 @@
+{
+  "name": "League Remote",
+  "short_name": "LoL Remote",
+  "description": "Controle a fila e o champ select do LoL pelo celular.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "lang": "pt-BR"
+}
