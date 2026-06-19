@@ -148,7 +148,7 @@ function renderAram(cs) {
       '</div>' +
     '</div>';
 
-  h += '<div class="aram-sec">Banco de reserva</div>';
+  h += '<div class="aram-sec">Escolha seu campeao</div>';
   if (cs.bench && cs.bench.length) {
     h += '<div class="bench-grid">' + cs.bench.map(b =>
       '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
@@ -157,7 +157,7 @@ function renderAram(cs) {
       '</div>'
     ).join("") + '</div>';
   } else {
-    h += '<div class="muted" style="font-size:12px">banco vazio</div>';
+    h += '<div class="muted" style="font-size:12px">nenhum campeao disponivel no momento</div>';
   }
 
   if (cs.trades && cs.trades.length) {
@@ -662,7 +662,23 @@ async function tick() {
     document.getElementById("conn-dot").className = "dot " + (s.connected ? "on" : "off");
 
     const phaseEl = document.getElementById("phase");
-    phaseEl.textContent = PHASE_PT[s.phase] || (s.phase || "--");
+    let phaseTxt = PHASE_PT[s.phase] || (s.phase || "--");
+    if (s.mode_name && ["Matchmaking", "ReadyCheck", "ChampSelect", "InProgress"].includes(s.phase)) {
+      phaseTxt += " — " + s.mode_name;
+    }
+    phaseEl.textContent = phaseTxt;
+
+    // ARAM: Desordem nao tem runas (usa aprimoramentos) -> esconde o painel.
+    const runesBtn = document.getElementById("runesbtn");
+    if (runesBtn) {
+      if (s.runes_enabled === false) {
+        runesBtn.style.display = "none";
+        const rp = document.getElementById("runes-panel");
+        if (rp) rp.hidden = true;
+      } else {
+        runesBtn.style.display = "";
+      }
+    }
 
     const btn = document.getElementById("accept");
     const content = document.getElementById("content");

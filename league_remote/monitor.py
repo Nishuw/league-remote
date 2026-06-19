@@ -20,6 +20,20 @@ FAST_POLL_PHASES = ("ReadyCheck", "Matchmaking", "ChampSelect")
 FAST_POLL_INTERVAL = 0.7
 SLOW_POLL_INTERVAL = 1.5
 
+# Filas do ARAM: Desordem (Mayhem). Esses modos usam augments no lugar de
+# runas, entao o painel de runas nao se aplica.
+MAYHEM_QUEUE_IDS = {2400, 2401, 2402, 2403, 2404, 2405}
+
+
+def _runes_enabled_for_queue(queue: Optional[Dict[str, Any]]) -> bool:
+    """ARAM: Desordem nao tem runas (usa aprimoramentos)."""
+    if not queue:
+        return True
+    if queue.get("id") in MAYHEM_QUEUE_IDS:
+        return False
+    name = (queue.get("name") or queue.get("description") or "").lower()
+    return not ("mayhem" in name or "desordem" in name)
+
 
 class Monitor:
     """Acompanha o cliente do LoL e mantem o estado compartilhado."""
@@ -37,6 +51,9 @@ class Monitor:
             "ready_timer": 0,
             "champ_select": None,
             "last_action": "",
+            "queue_id": None,
+            "mode_name": None,
+            "runes_enabled": True,
         }
         self.config: Dict[str, Any] = {
             "auto_pick_enabled": False,
@@ -305,6 +322,8 @@ class Monitor:
                 self.state["connected"] = self.client.base_url is not None
                 self.state["phase"] = phase
 
+            self._update_queue()
+
             if phase == "Matchmaking":
                 self._handle_matchmaking()
             elif phase == "ReadyCheck":
@@ -363,6 +382,15 @@ class Monitor:
         self._auto_accepted_this_check = False
         if cs and cs.get("is_my_turn"):
             self._maybe_auto_act(cs)
+
+    def _update_queue(self) -> None:
+        """Le a fila atual para rotular o modo e saber se ha runas."""
+        sess = self.client.get_gameflow_session() or {}
+        queue = ((sess.get("gameData") or {}).get("queue")) or {}
+        with self.lock:
+            self.state["queue_id"] = queue.get("id")
+            self.state["mode_name"] = queue.get("name") or queue.get("description")
+            self.state["runes_enabled"] = _runes_enabled_for_queue(queue)
 
     def _handle_idle(self) -> None:
         with self.lock:

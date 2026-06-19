@@ -158,6 +158,10 @@ class LCUClient:
         """Lobby, Matchmaking, ReadyCheck, ChampSelect, InProgress, None..."""
         return self._get("/lol-gameflow/v1/gameflow-phase")
 
+    def get_gameflow_session(self) -> Optional[Dict[str, Any]]:
+        """Sessao do gameflow; contem gameData.queue (id, nome, modo)."""
+        return self._get("/lol-gameflow/v1/session")
+
     def get_champ_select_session(self) -> Optional[Dict[str, Any]]:
         return self._get("/lol-champ-select/v1/session")
 
