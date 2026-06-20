@@ -96,6 +96,22 @@ def create_app(monitor: Monitor) -> Flask:
             monitor.set_last_action(f"{verb} pelo celular")
         return jsonify({"ok": ok})
 
+    @app.route("/debug/champ-select")
+    def debug_champ_select():
+        """Dump cru da sessao de champ select (para diagnosticar ARAM/Desordem)."""
+        session = client.get_champ_select_session()
+        gameflow = client.get_gameflow_session()
+        bench = session.get("benchChampions") if isinstance(session, dict) else None
+        return jsonify({
+            "connected": client.base_url is not None,
+            "champ_select_keys": sorted(session.keys()) if isinstance(session, dict) else None,
+            "benchEnabled": session.get("benchEnabled") if isinstance(session, dict) else None,
+            "benchChampions": bench,
+            "rerollsRemaining": session.get("rerollsRemaining") if isinstance(session, dict) else None,
+            "champ_select": session,
+            "gameflow": gameflow,
+        })
+
     @app.route("/aram/reroll", methods=["POST"])
     def aram_reroll():
         ok = client.reroll()
@@ -312,20 +328,26 @@ def create_app(monitor: Monitor) -> Flask:
         client.load_champion_data()
         name_to_id = {v: k for k, v in client.champ_map.items()}
 
-        champ_team = {}
+        # Indice por nome (os eventos usam o nome do jogador, nao do campeao)
+        # para resolver autor/vitima -> time, campeao e icone.
+        pindex = {}
         players = []
         team_kills = {"ORDER": 0, "CHAOS": 0}
         for p in data.get("allPlayers", []) or []:
             sc = p.get("scores", {}) or {}
             team = p.get("team")
             cname = p.get("championName")
-            champ_team[cname] = team
+            cid = name_to_id.get(cname)
+            info = {"team": team, "champion": cname, "champion_id": cid}
+            for key in (p.get("riotIdGameName"), p.get("summonerName"), cname):
+                if key:
+                    pindex[key] = info
             if team in team_kills:
                 team_kills[team] += int(sc.get("kills", 0) or 0)
             players.append({
                 "name": p.get("riotIdGameName") or p.get("summonerName"),
                 "champion": cname,
-                "champion_id": name_to_id.get(cname),
+                "champion_id": cid,
                 "team": team,
                 "k": sc.get("kills", 0),
                 "d": sc.get("deaths", 0),
@@ -338,48 +360,68 @@ def create_app(monitor: Monitor) -> Flask:
                 "position": (p.get("position") or "").lower(),
             })
 
+        def who(n):
+            return pindex.get(n) or {}
+
+        def champ_of(n):
+            return who(n).get("champion") or n or "?"
+
         # Objetivos e feed a partir dos eventos da partida
         objectives = {
             "ORDER": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "inhibs": 0},
             "CHAOS": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "inhibs": 0},
         }
+        multi_labels = {2: "Double Kill", 3: "Triple Kill", 4: "Quadra Kill", 5: "Penta Kill"}
         feed = []
         for ev in (data.get("events", {}) or {}).get("Events", []) or []:
             name = ev.get("EventName")
             killer = ev.get("KillerName")
+            ki = who(killer)
             t = int(ev.get("EventTime", 0) or 0)
-            if name == "TurretKilled":
+
+            if name == "ChampionKill":
+                victim = ev.get("VictimName")
+                assists = ev.get("Assisters") or []
+                txt = f"{champ_of(killer)} matou {champ_of(victim)}"
+                if assists:
+                    txt += f" (+{len(assists)})"
+                feed.append({"t": t, "txt": txt, "team": ki.get("team"), "cid": ki.get("champion_id"), "kind": "kill"})
+            elif name == "Multikill":
+                streak = int(ev.get("KillStreak", 0) or 0)
+                txt = f"{champ_of(killer)} - {multi_labels.get(streak, str(streak) + ' Kills')}!"
+                feed.append({"t": t, "txt": txt, "team": ki.get("team"), "cid": ki.get("champion_id"), "kind": "multi"})
+            elif name == "FirstBlood":
+                rec = ev.get("Recipient")
+                ri = who(rec)
+                feed.append({"t": t, "txt": f"First Blood: {champ_of(rec)}", "team": ri.get("team"), "cid": ri.get("champion_id"), "kind": "fb"})
+            elif name == "TurretKilled":
                 tk = ev.get("TurretKilled", "")
-                if "_T1_" in tk:
-                    objectives["CHAOS"]["towers"] += 1
-                elif "_T2_" in tk:
-                    objectives["ORDER"]["towers"] += 1
+                tm = "CHAOS" if "_T1_" in tk else ("ORDER" if "_T2_" in tk else None)
+                if tm:
+                    objectives[tm]["towers"] += 1
             elif name == "InhibKilled":
                 ik = ev.get("InhibKilled", "")
-                if "_T1_" in ik:
-                    objectives["CHAOS"]["inhibs"] += 1
-                elif "_T2_" in ik:
-                    objectives["ORDER"]["inhibs"] += 1
+                tm = "CHAOS" if "_T1_" in ik else ("ORDER" if "_T2_" in ik else None)
+                if tm:
+                    objectives[tm]["inhibs"] += 1
             elif name == "DragonKill":
-                team = champ_team.get(killer)
-                if team in objectives:
-                    objectives[team]["dragons"] += 1
+                tm = ki.get("team")
+                if tm in objectives:
+                    objectives[tm]["dragons"] += 1
                 dt = ev.get("DragonType")
-                feed.append({"t": t, "txt": f"{killer or '?'} matou o Dragao" + (f" {dt}" if dt else "")})
+                feed.append({"t": t, "txt": f"{champ_of(killer)} matou o Dragao" + (f" {dt}" if dt else ""), "team": tm, "cid": ki.get("champion_id"), "kind": "dragon"})
             elif name == "HeraldKill":
-                team = champ_team.get(killer)
-                if team in objectives:
-                    objectives[team]["heralds"] += 1
-                feed.append({"t": t, "txt": f"{killer or '?'} matou o Arauto"})
+                tm = ki.get("team")
+                if tm in objectives:
+                    objectives[tm]["heralds"] += 1
+                feed.append({"t": t, "txt": f"{champ_of(killer)} matou o Arauto", "team": tm, "cid": ki.get("champion_id"), "kind": "herald"})
             elif name == "BaronKill":
-                team = champ_team.get(killer)
-                if team in objectives:
-                    objectives[team]["barons"] += 1
-                feed.append({"t": t, "txt": f"{killer or '?'} matou o Barao"})
-            elif name == "FirstBlood":
-                feed.append({"t": t, "txt": "Primeiro abate (First Blood)"})
+                tm = ki.get("team")
+                if tm in objectives:
+                    objectives[tm]["barons"] += 1
+                feed.append({"t": t, "txt": f"{champ_of(killer)} matou o Barao", "team": tm, "cid": ki.get("champion_id"), "kind": "baron"})
             elif name == "Ace":
-                feed.append({"t": t, "txt": "ACE!"})
+                feed.append({"t": t, "txt": f"ACE! ({champ_of(ev.get('Acer'))})", "team": ev.get("AcingTeam"), "kind": "ace"})
 
         active = data.get("activePlayer", {}) or {}
         gold = active.get("currentGold") if isinstance(active, dict) else None
@@ -392,7 +434,7 @@ def create_app(monitor: Monitor) -> Flask:
             "team_kills": team_kills,
             "objectives": objectives,
             "your_gold": int(gold) if isinstance(gold, (int, float)) else None,
-            "feed": feed[-6:],
+            "feed": feed[-18:],
             "players": players,
         })
 

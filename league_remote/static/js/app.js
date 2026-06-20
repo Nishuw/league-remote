@@ -580,7 +580,11 @@ async function loadLive() {
       h += '<div class="lfeed"><div class="lfeed-t">Eventos</div>' +
         d.feed.slice().reverse().map(e => {
           const m = Math.floor((e.t || 0) / 60), s = Math.floor((e.t || 0) % 60);
-          return '<div class="lfeed-row"><span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' + e.txt + '</div>';
+          const cls = "lfeed-row" + (e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : ""));
+          const ic = e.cid ? '<img class="lfeed-ic" src="' + champIcon(e.cid) + '" onerror="this.style.display=\'none\'">' : "";
+          return '<div class="' + cls + '">' +
+            '<span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' +
+            ic + '<span class="lfeed-txt">' + e.txt + '</span></div>';
         }).join("") + '</div>';
     }
     live.innerHTML = h;
