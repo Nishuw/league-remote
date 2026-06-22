@@ -33,7 +33,10 @@ class LCUClient:
         self.base_url: Optional[str] = None
         self.headers: Dict[str, str] = {}
         self.champ_map: Dict[int, str] = {}
+        self.spell_map: Dict[int, Dict[str, str]] = {}
         self.summoner_name_cache: Dict[int, Dict[str, Any]] = {}
+        # Status HTTP da ultima acao de pick/swap (pro feedback na UI).
+        self.last_status: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Conexao
@@ -76,6 +79,19 @@ class LCUClient:
         token = base64.b64encode(f"riot:{self.password}".encode()).decode()
         self.headers = {"Authorization": f"Basic {token}"}
         return True
+
+    def ws_connection_info(self) -> Optional[tuple]:
+        """URL e header de auth do WebSocket de eventos da LCU.
+
+        Mesma porta/senha da REST API. O cliente expoe um WebSocket (protocolo
+        estilo WAMP) que faz *push* dos eventos em tempo real -- e assim que o
+        Blitz e overlays acompanham o champ select sem lag de polling.
+        Retorna (url, [header]) ou None se ainda nao ha conexao.
+        """
+        if not self.port or "Authorization" not in self.headers:
+            return None
+        url = f"wss://127.0.0.1:{self.port}/"
+        return url, [f"Authorization: {self.headers['Authorization']}"]
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -150,6 +166,32 @@ class LCUClient:
             return None
         return self.champ_map.get(int(champ_id))
 
+    @staticmethod
+    def asset_url(path: Optional[str]) -> str:
+        """Converte um caminho de asset da LCU em URL publica (CommunityDragon)."""
+        if not path:
+            return ""
+        p = path.lower().lstrip("/").replace("lol-game-data/assets/", "")
+        return (
+            "https://raw.communitydragon.org/latest/plugins/"
+            "rcp-be-lol-game-data/global/default/" + p
+        )
+
+    def load_summoner_spells(self) -> None:
+        """Carrega id->{name, icon} dos feitiços de invocador (uma vez)."""
+        if self.spell_map:
+            return
+        data = self._get("/lol-game-data/assets/v1/summoner-spells.json")
+        if isinstance(data, list):
+            self.spell_map = {
+                int(s["id"]): {
+                    "name": s.get("name", "?"),
+                    "icon": self.asset_url(s.get("iconPath")),
+                }
+                for s in data
+                if isinstance(s, dict) and "id" in s
+            }
+
     # ------------------------------------------------------------------
     # Gameflow / champ select
     # ------------------------------------------------------------------
@@ -168,6 +210,30 @@ class LCUClient:
     def get_pickable_champion_ids(self) -> list:
         return self._get("/lol-champ-select/v1/pickable-champion-ids") or []
 
+    def get_subset_champion_list(self) -> list:
+        """Campeoes da ESCOLHA INICIAL do ARAM/Desordem (subset pessoal).
+
+        Nos modos com `benchEnabled` + subset picks, a LCU te oferece 2-3
+        campeoes para escolher logo na chegada (o resto vai pra roleta). Esse
+        subconjunto NAO esta na sessao do champ-select nem em
+        `pickable-champion-ids` (que lista todos) -- vem deste endpoint do
+        team-builder legado. Disponivel no t=0, antes do `benchChampions`
+        popular. Retorna uma lista de ids (ints).
+        """
+        data = self._get("/lol-lobby-team-builder/champ-select/v1/subset-champion-list")
+        out: List[int] = []
+        if isinstance(data, list):
+            for c in data:
+                if isinstance(c, int):
+                    cid = c
+                elif isinstance(c, dict):
+                    cid = c.get("championId") or c.get("id") or 0
+                else:
+                    cid = 0
+                if cid and int(cid) > 0 and int(cid) not in out:
+                    out.append(int(cid))
+        return out
+
     def get_bannable_champion_ids(self) -> list:
         return self._get("/lol-champ-select/v1/bannable-champion-ids") or []
 
@@ -183,11 +249,34 @@ class LCUClient:
                     return {"id": act.get("id"), "type": act.get("type")}
         return {}
 
+    def set_my_selection(self, payload: Dict[str, Any]) -> bool:
+        """Atualiza a selecao do jogador (feitiicos/skin/ward) no champ select."""
+        return self._patch("/lol-champ-select/v1/session/my-selection", payload)
+
+    def get_skin_carousel(self) -> list:
+        """Skins disponiveis do campeao atual no champ select."""
+        return self._get("/lol-champ-select/v1/skin-carousel-skins") or []
+
     def patch_action(self, action_id: int, champion_id: int, completed: bool) -> bool:
-        return self._patch(
+        r = self._request(
+            "PATCH",
             f"/lol-champ-select/v1/session/actions/{action_id}",
-            {"championId": int(champion_id), "completed": bool(completed)},
+            json={"championId": int(champion_id), "completed": bool(completed)},
         )
+        status = getattr(r, "status_code", None)
+        ok = r is not None and status in (200, 204)
+        self.last_status = status
+        detail = ""
+        if r is not None and not ok:
+            try:
+                detail = f" body={r.text[:200]!r}"
+            except Exception:  # noqa: BLE001
+                pass
+        print(
+            f"[aram] patch_action id={action_id} champ={champion_id} "
+            f"completed={completed} -> status={status} ok={ok}{detail}"
+        )
+        return ok
 
     # ------------------------------------------------------------------
     # ARAM: banco de reserva e trocas
@@ -195,7 +284,20 @@ class LCUClient:
 
     def bench_swap(self, champion_id: int) -> bool:
         """Troca o campeao atual por um do banco de reserva (ARAM)."""
-        return self._post(f"/lol-champ-select/v1/session/bench/swap/{int(champion_id)}")
+        r = self._request(
+            "POST", f"/lol-champ-select/v1/session/bench/swap/{int(champion_id)}"
+        )
+        status = getattr(r, "status_code", None)
+        ok = r is not None and status in (200, 204)
+        self.last_status = status
+        detail = ""
+        if r is not None and not ok:
+            try:
+                detail = f" body={r.text[:200]!r}"
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"[aram] bench_swap champ={champion_id} -> status={status} ok={ok}{detail}")
+        return ok
 
     def trade_request(self, trade_id: int) -> bool:
         """Oferece troca de campeao a um aliado."""
@@ -272,6 +374,18 @@ class LCUClient:
     def leave_lobby(self) -> bool:
         """Sai do lobby atual."""
         return self._delete("/lol-lobby/v1/lobby")
+
+    def get_lobby(self) -> Optional[Dict[str, Any]]:
+        """Lobby atual (gameConfig.queueId, members, canStartActivity) ou None."""
+        return self._get("/lol-lobby/v2/lobby")
+
+    def create_lobby(self, queue_id: int) -> bool:
+        """Cria um lobby para a fila informada (ex.: 450=ARAM, 420=Ranked Solo)."""
+        return self._post_json("/lol-lobby/v2/lobby", {"queueId": int(queue_id)}) is not None
+
+    def start_matchmaking(self) -> bool:
+        """Inicia a busca por partida (o 'Encontrar Partida')."""
+        return self._post("/lol-lobby/v2/lobby/matchmaking/search")
 
     def dodge_champ_select(self) -> bool:
         """Da dodge (sai) do champ select em andamento.

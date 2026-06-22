@@ -50,8 +50,11 @@ def main() -> None:
     client = LCUClient()
     monitor = Monitor(client)
 
-    thread = threading.Thread(target=monitor.run, daemon=True)
-    thread.start()
+    # Polling de fundo (rede de seguranca) + WebSocket de eventos (push em
+    # tempo real, como o Blitz). Os dois alimentam o mesmo estado: o WS deixa
+    # o champ select instantaneo; o polling cobre se o WS cair ou faltar.
+    threading.Thread(target=monitor.run, daemon=True).start()
+    threading.Thread(target=monitor.run_ws, daemon=True).start()
 
     app = create_app(monitor)
 

@@ -5,12 +5,32 @@ champ select) e executa acoes automaticas opcionais (auto-accept de
 fallback, auto-pick e auto-ban).
 """
 
+import json
+import ssl
 import threading
 import time
 from typing import Any, Dict, Optional
 
+try:  # dependencia opcional: sem ela, o monitor cai no polling puro.
+    import websocket  # type: ignore
+except ImportError:  # pragma: no cover
+    websocket = None
+
 from .config import AUTO_ACCEPT_FALLBACK_SECONDS
 from .lcu_client import LCUClient
+
+# Eventos da LCU (estilo WAMP). Subscrevemos so o que importa para o controle
+# remoto: fase do jogo, sessao do champ select e o ready-check.
+WS_SUBSCRIBE = (
+    "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase",
+    "OnJsonApiEvent_lol-champ-select_v1_session",
+    "OnJsonApiEvent_lol-matchmaking_v1_ready-check",
+)
+# Fases em que NAO ha champ select; usadas para limpar o estado.
+_NON_CHAMP_PHASES = {
+    "None", "Lobby", "Matchmaking", "ReadyCheck",
+    "InProgress", "Reconnect", "WaitingForStats", "PreEndOfGame", "EndOfGame",
+}
 
 # Duracao aproximada do ready-check em segundos (o timer conta pra cima).
 READY_CHECK_DURATION = 12
@@ -183,17 +203,28 @@ class Monitor:
         cell_champ: Dict[Any, int] = {}
         cell_sid: Dict[Any, int] = {}
         my_champion_id = 0
+        my_spell1 = my_spell2 = 0
         for p in session.get("myTeam", []) or []:
             cell = p.get("cellId")
             cell_champ[cell] = p.get("championId") or 0
             cell_sid[cell] = p.get("summonerId")
             if cell == local_cell:
                 my_champion_id = p.get("championId") or 0
+                my_spell1 = p.get("spell1Id") or 0
+                my_spell2 = p.get("spell2Id") or 0
 
         bench = [
             {"champion_id": c.get("championId"), "champion": client.champ_name(c.get("championId"))}
             for c in session.get("benchChampions", []) or []
             if c.get("championId")
+        ]
+
+        # Escolha INICIAL (subset pessoal): 2-3 campeoes oferecidos na chegada,
+        # disponiveis ANTES da roleta (benchChampions) popular. Sem isso, o app
+        # so mostrava a roleta e perdia a escolha inicial do ARAM/Desordem.
+        subset = [
+            {"champion_id": cid, "champion": client.champ_name(cid)}
+            for cid in client.get_subset_champion_list()
         ]
 
         trades = []
@@ -217,9 +248,15 @@ class Monitor:
                 "champion": client.champ_name(champ_id),
             })
 
+        def spell_info(sid: int) -> Dict[str, Any]:
+            meta = client.spell_map.get(sid) or {}
+            return {"id": sid or None, "icon": meta.get("icon", ""), "name": meta.get("name", "")}
+
         return {
             "my_champion_id": my_champion_id or None,
             "my_champion": client.champ_name(my_champion_id),
+            "my_spells": [spell_info(my_spell1), spell_info(my_spell2)],
+            "subset": subset,
             "bench": bench,
             "trades": trades,
         }
@@ -383,8 +420,18 @@ class Monitor:
                 self.set_last_action("Auto-accept (fallback) acionado")
 
     def _handle_champ_select(self) -> None:
-        self.client.load_champion_data()
         session = self.client.get_champ_select_session()
+        self._apply_champ_select(session)
+
+    def _apply_champ_select(self, session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Processa uma sessao de champ select (de polling OU do WebSocket).
+
+        Centralizado para que a thread de eventos (push em tempo real) e o
+        polling de fallback produzam exatamente o mesmo estado. E aqui que a
+        roleta do ARAM aparece assim que a LCU popula `benchChampions`.
+        """
+        self.client.load_champion_data()
+        self.client.load_summoner_spells()
         cs = self._build_champ_select(session) if session else None
         with self.lock:
             self.state["champ_select"] = cs
@@ -394,6 +441,7 @@ class Monitor:
         self._auto_accepted_this_check = False
         if cs and cs.get("is_my_turn"):
             self._maybe_auto_act(cs)
+        return cs
 
     def _update_queue(self) -> None:
         """Le a fila atual para rotular o modo e saber se ha runas."""
@@ -412,3 +460,124 @@ class Monitor:
             self.state["champ_select"] = None
         self._auto_accepted_this_check = False
         self._auto_acted_actions.clear()
+
+    # ------------------------------------------------------------------
+    # WebSocket de eventos (push em tempo real, como o Blitz)
+    # ------------------------------------------------------------------
+
+    def run_ws(self) -> None:
+        """Loop da thread de eventos: conecta, escuta e reconecta para sempre.
+
+        O polling (`run`) continua rodando como rede de seguranca; esta thread
+        so deixa o estado *instantaneo*. Sem a dependencia `websocket-client`,
+        retorna e o app segue 100% por polling.
+        """
+        if websocket is None:
+            print("[ws] 'websocket-client' nao instalado; usando so polling.")
+            return
+        while True:
+            try:
+                self._ws_session()
+            except Exception as exc:  # noqa: BLE001 - a thread nunca pode morrer
+                print(f"[ws] desconectado: {exc!r}")
+            time.sleep(2)  # backoff antes de reconectar
+
+    def _ws_session(self) -> None:
+        """Abre uma conexao WebSocket e processa eventos ate cair."""
+        client = self.client
+        if not client.base_url and not client.connect():
+            time.sleep(2)
+            return
+        info = client.ws_connection_info()
+        if not info:
+            time.sleep(2)
+            return
+        url, header = info
+        ws = websocket.create_connection(
+            url,
+            header=header,
+            sslopt={"cert_reqs": ssl.CERT_NONE},
+            timeout=5,
+        )
+        try:
+            for event in WS_SUBSCRIBE:
+                ws.send(json.dumps([5, event]))  # 5 = SUBSCRIBE (WAMP)
+            print("[ws] conectado; eventos em tempo real ativos.")
+            # Sincroniza o estado atual uma vez (a LCU so envia *mudancas*).
+            self._tick()
+            # timeout alto: o champ select envia updates com frequencia; se
+            # ficar mudo tempo demais, o recv estoura e reconectamos.
+            ws.settimeout(90)
+            while True:
+                raw = ws.recv()
+                if not raw:
+                    continue
+                self._on_ws_message(raw)
+        finally:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_ws_message(self, raw: str) -> None:
+        """Decodifica uma mensagem WAMP `[8, event, payload]` e despacha."""
+        try:
+            msg = json.loads(raw)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(msg, list) or len(msg) < 3:
+            return
+        payload = msg[2]
+        if not isinstance(payload, dict):
+            return
+        self._on_ws_event(payload.get("uri", ""), payload.get("eventType"), payload.get("data"))
+
+    def _on_ws_event(self, uri: str, etype: Optional[str], data: Any) -> None:
+        """Aplica um evento da LCU ao estado compartilhado, na hora."""
+        if uri == "/lol-gameflow/v1/gameflow-phase":
+            phase = data if isinstance(data, str) else None
+            with self.lock:
+                self.state["connected"] = True
+                self.state["phase"] = phase
+            if phase in _NON_CHAMP_PHASES:
+                with self.lock:
+                    self.state["champ_select"] = None
+                if phase != "ReadyCheck":
+                    self._auto_acted_actions.clear()
+
+        elif uri == "/lol-champ-select/v1/session":
+            # `data` ja e a sessao completa -- nao precisa de novo GET. E aqui
+            # que a roleta do ARAM aparece no exato instante em que popula.
+            if etype == "Delete" or not data:
+                with self.lock:
+                    self.state["champ_select"] = None
+            else:
+                with self.lock:
+                    self.state["phase"] = "ChampSelect"
+                self._apply_champ_select(data)
+
+        elif uri == "/lol-matchmaking/v1/ready-check":
+            if etype == "Delete" or not data:
+                with self.lock:
+                    self.state["ready_check"] = False
+                    self.state["player_response"] = "None"
+                return
+            state = data.get("state")
+            in_progress = state == "InProgress"
+            timer = int(data.get("timer", 0) or 0)
+            player_response = data.get("playerResponse", "None")
+            with self.lock:
+                self.state["ready_check"] = in_progress
+                self.state["ready_timer"] = timer
+                self.state["player_response"] = player_response
+            if (
+                in_progress
+                and player_response == "None"
+                and AUTO_ACCEPT_FALLBACK_SECONDS is not None
+                and timer >= AUTO_ACCEPT_FALLBACK_SECONDS
+                and not self._auto_accepted_this_check
+                and timer >= (READY_CHECK_DURATION - AUTO_ACCEPT_FALLBACK_SECONDS)
+            ):
+                if self.client.accept_match():
+                    self._auto_accepted_this_check = True
+                    self.set_last_action("Auto-accept (fallback) acionado")

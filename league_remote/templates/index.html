@@ -27,6 +27,7 @@
       <div id="content">
         <div class="queue" id="queue">--</div>
         <div class="muted" id="queue-label">tempo de fila</div>
+        <div id="queue-panel"></div>
         <div id="idle-extra"></div>
       </div>
       <div class="champ" id="champ"></div>
@@ -48,6 +49,13 @@
     <button class="declinebtn" id="declinebtn" onclick="decline()">Recusar</button>
     <button class="accept" id="accept" onclick="accept()">ACEITAR</button>
   </div>
+
+  <div class="sheet" id="picker-modal" hidden>
+    <div class="sheet-backdrop" onclick="closePicker()"></div>
+    <div class="sheet-body" id="picker-body"></div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
 
   <script src="{{ url_for('static', filename='js/app.js', v=v) }}"></script>
 </body>

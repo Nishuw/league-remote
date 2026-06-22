@@ -75,16 +75,69 @@ Motivos da separação:
   campeão que um companheiro já escolheu/hoverou.
 - Validação contra a lista de campeões realmente disponíveis para a ação.
 
+### Criar e iniciar fila pelo celular
+- Antes só dava pra **reagir** (aceitar/recusar/sair). Agora dá pra **montar a fila
+  do zero**: na tela inicial aparece um seletor de filas (ARAM, ARAM: Desordem,
+  Normal Seleção/Às Cegas, Ranqueada Solo/Flex, Arena).
+- Tocar numa fila cria o lobby (`POST /lol-lobby/v2/lobby` com `queueId`); o painel
+  troca para **"Encontrar Partida"** (`POST .../lobby/matchmaking/search`) + **Sair
+  do lobby** (`DELETE /lol-lobby/v1/lobby`).
+- Rotas no servidor: `GET/POST/DELETE /lobby` e `POST /queue/start`. O `GET /lobby`
+  devolve um resumo (`queue_id`, `can_start`, `members`) pro celular decidir o que
+  mostrar. O seletor some quando já está em `Matchmaking` (aí o botão é "Sair da fila").
+- Fluxo completo agora cabe no celular: **criar fila → encontrar → aceitar →
+  pick/ban → jogar**.
+
+### Feedback na tela (toast) + cronômetro
+- Toda ação (pegar campeão, feitiços, skin, criar/iniciar fila) agora mostra um
+  **toast** no rodapé com o resultado — verde pra ok, vermelho pra falha. O
+  `/aram/swap` devolve `{ok, status, msg}` (status HTTP da LCU), então o toast diz
+  "Travado: Sett" ou "Falhou (409)" direto no celular, sem precisar olhar o terminal.
+- No painel do ARAM mostro um **cronômetro** (segundos restantes da fase), que fica
+  vermelho nos últimos 5s — deixa claro que a escolha tem tempo limitado.
+
+### Feitiços e skin no champ select (ARAM)
+- Abaixo do "seu campeão" mostro os **dois feitiços** (ícones) tocáveis e um botão
+  **Skin**. Tocar abre um **bottom-sheet** (modal de baixo) com as opções.
+- Feitiços: lista curada dos permitidos no ARAM (Flash e Snowball primeiro). Tocar
+  troca via `PATCH /lol-champ-select/v1/session/my-selection`; se eu escolher um que
+  já está no outro slot, faz **swap** dos dois.
+- Skins: carrossel das skins do campeão (`GET .../skin-carousel-skins`), com a atual
+  destacada e as bloqueadas com cadeado; tocar aplica `selectedSkinId`.
+- **Detalhe de UI importante:** o `#champ-info` é redesenhado a cada 700ms (tick),
+  então o seletor é um **modal separado** (não dentro do champ-info) — assim ele não
+  pisca nem fecha sozinho a cada ciclo. Ícones vêm do CommunityDragon via
+  `LCUClient.asset_url` (mesma conversão das runas).
+
 ### Runas (a qualquer momento)
 - Painel de runas acessível **fora do champ select também** (na fila, no menu).
 - Troca entre páginas salvas, **monta runa do zero** e **salva como nova página**.
 
 ### ARAM e ARAM: Desordem
-- Detecto o modo "banco" (`benchEnabled`) e mostro a **roleta** com os campeões
-  disponíveis como cartas tocáveis.
-- Toque numa carta tenta **trocar pelo banco**; se eu ainda não tenho campeão
-  (escolha inicial), o backend faz **fallback** completando a ação de `pick` com
-  aquele campeão. Assim o mesmo gesto cobre escolha inicial e troca depois.
+- Detecto o modo "banco" (`benchEnabled`) e mostro **duas seções distintas**:
+  a **escolha inicial** (subset) e a **roleta** (banco), como cartas tocáveis.
+- **Escolha inicial (subset).** Os 2-3 campeões que você pega na chegada vêm de
+  `GET /lol-lobby-team-builder/champ-select/v1/subset-champion-list` (team-builder
+  **legado**) — **não** do `benchChampions`. Já vêm populados **no t=0**, antes
+  da roleta. O front mostra **"Escolha seu campeão (toque)"** com essas cartas
+  enquanto você ainda não tem campeão. Detalhe completo na seção de bugs abaixo.
+- **Roleta (banco).** O `benchChampions` começa **vazio** e popula gradualmente
+  (~5s depois: 1, 4, 5, 6...). É o pool de **troca** depois que você já tem
+  campeão (e pra onde vai o subset que você **não** escolheu). Mostro como
+  "Roleta (toque para trocar/pegar)", sem repetir os campeões que já estão na
+  escolha inicial.
+- **Mesmo gesto cobre tudo.** Tocar qualquer carta cai no `/aram/swap`, que
+  decide pelo estado: sem campeão + pick em progresso → **completa o pick**
+  (`patch_action`, trava o campeão); com campeão → **troca pelo banco**
+  (`bench/swap`). Validado: vira `my_champion_id`; aliados aparecem com a ação
+  `pick` `completed:true`.
+- **Fluxo temporal (confirmado por captura ao vivo a 4x/s):** t=0 → subset já
+  disponível (`[235, 133]`), `benchChampions` vazio, sua ação de `pick` em
+  progresso com `championId 0`. ~5s → roleta começa a popular. ~9s → você
+  escolhe (pick `completed`, `my_championId` setado). Depois → roleta vira
+  troca, e o subset não-escolhido aparece nela. O subset **persiste** a fase
+  toda. Só mostro "sorteando campeões..." no caso raro de nem subset nem roleta
+  existirem ainda.
 - Trocas com aliados (request/accept/decline) quando o modo permite.
 - **Removi os rerolls** (foram tirados do ARAM normal).
 - **Desordem não tem runas**: escondo o painel de runas e rotulo o modo certo.
@@ -117,6 +170,28 @@ Motivos da separação:
 - Indicador de **build** no rodapé para eu confirmar que o celular pegou o
   código novo.
 
+### Monitoramento em tempo real (WebSocket de eventos da LCU)
+- **Problema:** no ARAM/Desordem, ao chegar no champ select, os primeiros 2-3s
+  o app não acompanhava — a roleta aparecia atrasada e a "minha vez"/pick às
+  vezes nem era reconhecida. Causa: eu só fazia **polling** (0,7s no monitor +
+  0,7s no frontend), então estava sempre atrás de cada transição rápida do
+  `benchChampions`.
+- **Como o Blitz faz:** conecta no **WebSocket** da LCU
+  (`wss://127.0.0.1:porta/`, mesma auth Basic do REST) e assina
+  `OnJsonApiEvent_lol-champ-select_v1_session`. A LCU faz **push** da sessão
+  inteira no instante em que ela muda — inclusive quando a roleta popula.
+- **O que implementei:** uma segunda thread (`Monitor.run_ws`) que assina
+  `gameflow-phase`, `champ-select session` e `ready-check`. O payload do evento
+  de sessão **já é a sessão completa**, então reaproveito o
+  `_apply_champ_select` (extraído do polling) e atualizo o estado na hora, sem
+  novo GET. O **polling continua** como rede de segurança (cobre se o WS cair
+  ou faltar a lib). No frontend, o tick virou **adaptativo** (350ms em
+  ReadyCheck/ChampSelect, 700ms no resto) pra tela acompanhar o backend
+  instantâneo. Dependência nova: `websocket-client`.
+- **Validei** o fluxo do ARAM (bench vazio → bench populado → campeão travado)
+  alimentando `_on_ws_event` com sessões simuladas: o estado muda no instante
+  de cada evento, sem esperar ciclo de polling.
+
 ## Decisões e bugs que resolvi (pra eu não esquecer)
 
 - **PowerShell não tem `&&`**: separei os comandos ou usei `;`.
@@ -132,21 +207,37 @@ Motivos da separação:
   que mudou.
 - **Grade com todos os campeões aparecendo no ARAM**: passei a mostrar a grade
   completa **só no draft**; no ARAM/Desordem tudo é pela roleta.
+- **Origem dos 2-3 campeões iniciais do ARAM/Desordem (CORRIGIDO).** A
+  conclusão antiga estava **errada**: eu achava que os campeões da escolha
+  inicial eram os `benchChampions`. **Não são.** Capturei a sessão inteira ao
+  vivo (`tools/capture_champ_select.py`, sondando vários endpoints a 4x/s) e
+  descobri:
+  - O `benchChampions` é a **roleta de troca** — começa vazio e popula só ~5s
+    depois (gradual: 1, 4, 5, 6...). Não é a escolha inicial.
+  - A **escolha inicial** (os 2-3 campeões que você pega na chegada) vem de
+    **`GET /lol-lobby-team-builder/champ-select/v1/subset-champion-list`** —
+    um endpoint do team-builder **legado** que **não** aparece na sessão do
+    champ-select, nem em `pickable-champion-ids` (que lista todos), nem no
+    `/lol-champ-select/v1/subset-champion-list` (esse responde `null`). Ele já
+    vem populado **no t=0**, antes da roleta.
+  - Exemplo real: subset `[235, 133]` (Senna/Quinn) disponível no t=0; escolhi
+    Senna completando a ação de `pick` (`patch_action`); o não-escolhido (133)
+    foi parar na roleta depois. A lista do subset **persiste** a fase toda.
+  - **Por que o app parecia “não reconhecer”:** ele só lia `benchChampions`,
+    então nos primeiros ~5s não mostrava nada de útil (a escolha inicial não
+    estava ali). Agora o `_build_bench` busca o `subset-champion-list` e expõe
+    `subset`; o front mostra **“Escolha seu campeão (toque)”** com essas cartas
+    na chegada e a **“Roleta”** (bench) separada, sem repetir os mesmos
+    campeões. Tocar numa carta cai no `/aram/swap` de sempre: sem campeão +
+    pick em progresso → `patch_action` (trava); com campeão → `bench/swap`.
+  - **Validado** rodando `_build_champ_select` contra a sessão crua capturada:
+    no t=0 o `subset` vem `[Senna, Quinn]` mesmo com a roleta vazia.
 - **CS/KDA "travando" no painel ao vivo**: era uma corrida entre o poller de 1s e
   um throttle por tempo (`now - lastLiveLoad < 1000` às vezes dava 999ms e
   pulava). Troquei por uma **trava de requisição em andamento** (`liveLoading`)
   com `finally`, então a cada 1s sempre busca de verdade.
 
 ## O que ainda quero explorar
-
-### ARAM: Desordem — escolha inicial dos 2-3 campeões
-Ainda não confirmei **de onde** vêm os 2-3 campeões que aparecem para escolher ao
-cair no saguão. Os dumps que peguei foram sempre no extremo errado: ou no
-comecinho do `BAN_PICK` (com `benchChampions` vazio) ou na `FINALIZATION` (já com
-campeão escolhido e banco cheio). Falta capturar o **dump no instante exato** em
-que as cartas aparecem (`/debug/champ-select`, que já traz `pickable-champion-ids`
-e outros endpoints) para cravar a origem e garantir que as cartas iniciais
-apareçam certinho no celular.
 
 ### Cartas / augments do Desordem
 Por enquanto **ignorei** a mecânica de cartas/augments. Dá para evoluir lendo os

@@ -49,6 +49,66 @@ async function leaveQueue() {
   }
 }
 
+// ---- Filas: criar lobby / iniciar busca pelo celular ----
+const QUEUES = [
+  { id: 450, name: "ARAM" },
+  { id: 2400, name: "ARAM: Desordem" },
+  { id: 400, name: "Normal (Seleção)" },
+  { id: 430, name: "Normal (Às Cegas)" },
+  { id: 420, name: "Ranqueada Solo/Duo" },
+  { id: 440, name: "Ranqueada Flex" },
+  { id: 1700, name: "Arena" },
+];
+let lastLobbyLoad = 0;
+async function renderQueuePanel(force) {
+  const el = document.getElementById("queue-panel");
+  if (!el) return;
+  const now = Date.now();
+  if (!force && now - lastLobbyLoad < 2500) return;
+  lastLobbyLoad = now;
+  let lob = { in_lobby: false };
+  try { lob = await (await fetch("/lobby")).json(); } catch (e) {}
+  if (lob.in_lobby) {
+    const q = QUEUES.find(x => x.id === lob.queue_id);
+    const qname = q ? q.name : ("Fila " + (lob.queue_id || "?"));
+    el.innerHTML =
+      '<div class="qp-head">Lobby: ' + qname + '</div>' +
+      '<div class="qp-actions">' +
+        '<button class="qp-start" onclick="startSearch()">Encontrar Partida</button>' +
+        '<button class="qp-leave" onclick="leaveLobby()">Sair do lobby</button>' +
+      '</div>';
+  } else {
+    el.innerHTML =
+      '<div class="qp-head">Criar fila</div>' +
+      '<div class="qp-grid">' +
+      QUEUES.map(q => '<button class="qp-btn" onclick="createLobby(' + q.id + ')">' + q.name + '</button>').join("") +
+      '</div>';
+  }
+}
+async function createLobby(id) {
+  const q = QUEUES.find(x => x.id === id);
+  try {
+    const r = await fetch("/lobby", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ queueId: id })
+    });
+    const j = await r.json();
+    toast(j.ok ? ("Lobby: " + (q ? q.name : id)) : "Falha ao criar lobby", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
+  renderQueuePanel(true); tick();
+}
+async function startSearch() {
+  try {
+    const j = await (await fetch("/queue/start", { method: "POST" })).json();
+    toast(j.ok ? "Procurando partida..." : "Falha ao iniciar fila", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
+  tick();
+}
+async function leaveLobby() {
+  try { await fetch("/lobby", { method: "DELETE" }); toast("Saiu do lobby"); } catch (e) {}
+  renderQueuePanel(true); tick();
+}
+
 // ---- Alarme (vibrar + som) ----
 let audioCtx = null;
 let alarmTimer = null;
@@ -143,13 +203,28 @@ function teamsHtml(cs) {
 }
 
 // ---- ARAM: banco de reserva e trocas ----
+// Toast: feedback rapido na propria tela (sucesso/erro de cada acao).
+let toastTimer = null;
+function toast(msg, ok) {
+  const el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.className = "toast " + (ok === false ? "err" : "ok");
+  el.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+}
+
 async function benchSwap(id) {
   try {
-    await fetch("/aram/swap", {
+    const r = await fetch("/aram/swap", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ championId: id })
     });
-  } catch (e) {}
+    const j = await r.json();
+    toast(j.msg || (j.ok ? "ok" : "falhou"), j.ok);
+    tick();  // refresh imediato pra "seu campeao" aparecer na hora
+  } catch (e) { toast("erro de conexão", false); }
 }
 async function tradeAction(id, action) {
   try {
@@ -157,6 +232,7 @@ async function tradeAction(id, action) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, action })
     });
+    tick();
   } catch (e) {}
 }
 
@@ -170,14 +246,85 @@ function tradeButtons(t) {
   return '<span class="trade-state">' + String(t.state || "").toLowerCase() + '</span>';
 }
 
+// ---- Seletor (bottom-sheet) de feiticos e skin ----
+// Modal separado do #champ-info: nao e reconstruido a cada tick, entao nao pisca.
+function closePicker() {
+  const m = document.getElementById("picker-modal");
+  if (m) m.hidden = true;
+}
+async function openSpellPicker(slot) {
+  const body = document.getElementById("picker-body");
+  document.getElementById("picker-modal").hidden = false;
+  body.innerHTML = '<div class="sheet-title">carregando...</div>';
+  let d = { options: [] };
+  try { d = await (await fetch("/champ-select/spells")).json(); } catch (e) {}
+  const cur1 = d.spell1Id, cur2 = d.spell2Id;
+  const atual = slot === 1 ? cur1 : cur2;
+  body.innerHTML =
+    '<div class="sheet-title">Feitiço ' + slot + '</div>' +
+    '<div class="spell-grid">' +
+    d.options.map(o =>
+      '<button class="spellopt' + (o.id === atual ? ' sel' : '') + '" onclick="pickSpell(' + slot + ',' + o.id + ',' + cur1 + ',' + cur2 + ')">' +
+        '<img src="' + (o.icon || "") + '" onerror="this.style.visibility=\'hidden\'"><span>' + (o.name || "") + '</span>' +
+      '</button>'
+    ).join("") + '</div>';
+}
+async function pickSpell(slot, id, cur1, cur2) {
+  let s1 = cur1, s2 = cur2;
+  // Se escolher um feitico que ja esta no outro slot, troca os dois (swap).
+  if (slot === 1) { if (id === cur2) s2 = cur1; s1 = id; }
+  else { if (id === cur1) s1 = cur2; s2 = id; }
+  try {
+    const r = await fetch("/champ-select/spells", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ spell1Id: s1, spell2Id: s2 })
+    });
+    const j = await r.json();
+    toast(j.ok ? "Feitiços atualizados" : "Falha nos feitiços", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
+  closePicker(); tick();
+}
+async function openSkinPicker() {
+  const body = document.getElementById("picker-body");
+  document.getElementById("picker-modal").hidden = false;
+  body.innerHTML = '<div class="sheet-title">carregando skins...</div>';
+  let d = { skins: [] };
+  try { d = await (await fetch("/champ-select/skins")).json(); } catch (e) {}
+  const sel = d.selectedSkinId;
+  if (!d.skins.length) { body.innerHTML = '<div class="sheet-title">sem skins disponíveis</div>'; return; }
+  body.innerHTML =
+    '<div class="sheet-title">Escolher skin</div>' +
+    '<div class="skin-grid">' +
+    d.skins.map(s =>
+      '<button class="skinopt' + (s.id === sel ? ' sel' : '') + (s.owned ? '' : ' locked') + '" onclick="pickSkin(' + s.id + ')">' +
+        '<img src="' + (s.tile || "") + '" onerror="this.style.visibility=\'hidden\'"><span>' + (s.name || "") + '</span>' +
+      '</button>'
+    ).join("") + '</div>';
+}
+async function pickSkin(id) {
+  try {
+    const r = await fetch("/champ-select/skin", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ skinId: id })
+    });
+    const j = await r.json();
+    toast(j.ok ? "Skin trocada" : "Falha ao trocar skin", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
+  closePicker(); tick();
+}
+
 function renderAram(cs) {
   // ARAM (e ARAM: Desordem) sao todos aleatorios: nao existe grade de pick.
   // Voce recebe um campeao sorteado e troca pelo BANCO (as "cartas" que
   // aparecem) ou trocando com aliados.
-  let h = '<div class="aram-head">campeoes</div>';
+  const secs = cs.time_left ? Math.max(0, cs.time_left) : 0;
+  const timeTag = secs ? ' <span class="aram-time' + (secs <= 5 ? ' urgent' : '') + '">' + secs + 's</span>' : '';
+  let h = '<div class="aram-head">campeões' + timeTag + '</div>';
 
   const hasChamp = !!cs.my_champion_id;
   const hasBench = cs.bench && cs.bench.length;
+  const subset = cs.subset || [];
+  const hasSubset = subset.length > 0;
 
   // Campeao atual (depois de escolher / sortear)
   if (hasChamp) {
@@ -189,19 +336,44 @@ function renderAram(cs) {
       '</div></div>';
   }
 
-  // Banco / roleta: na chegada sao os campeoes para escolher e jogar; depois,
-  // os nao escolhidos que ficam disponiveis para troca. Tocar pega o campeao.
-  if (hasBench) {
+  // Feitiços (sempre tocáveis) + botão de skin (só quando já há campeão).
+  if (cs.my_spells && cs.my_spells.length === 2) {
+    h += '<div class="aram-spells">' +
+      cs.my_spells.map((sp, i) =>
+        '<button class="spellbtn" onclick="openSpellPicker(' + (i + 1) + ')" title="trocar feitiço">' +
+          '<img src="' + (sp.icon || "") + '" onerror="this.style.visibility=\'hidden\'">' +
+        '</button>'
+      ).join("") +
+      (hasChamp ? '<button class="skinbtn" onclick="openSkinPicker()">Skin</button>' : '') +
+    '</div>';
+  }
+
+  // Carta tocavel (escolha inicial ou roleta). Tocar -> /aram/swap, que decide
+  // pelo estado: sem campeao completa o PICK; com campeao troca pelo banco.
+  const card = b =>
+    '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
+      '<img src="' + champIcon(b.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
+      '<span>' + (b.champion || "?") + '</span>' +
+    '</div>';
+
+  // ESCOLHA INICIAL (subset pessoal): 2-3 campeoes oferecidos na chegada,
+  // disponiveis ANTES da roleta popular. So enquanto voce ainda nao tem campeao.
+  if (!hasChamp && hasSubset) {
+    h += '<div class="aram-sec">Escolha seu campeão (toque)</div>' +
+      '<div class="bench-grid cards">' + subset.map(card).join("") + '</div>';
+  }
+
+  // ROLETA (banco): os demais campeoes disponiveis para pegar/trocar. Evito
+  // repetir os que ja estao na escolha inicial acima.
+  const subsetIds = new Set(subset.map(b => b.champion_id));
+  const benchOnly = hasBench ? cs.bench.filter(b => hasChamp || !subsetIds.has(b.champion_id)) : [];
+  if (benchOnly.length) {
     const title = hasChamp ? "Roleta (toque para trocar)" : "Roleta (toque para pegar)";
-    h += '<div class="aram-sec">' + title + '</div><div class="bench-grid cards">' +
-      cs.bench.map(b =>
-        '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
-          '<img src="' + champIcon(b.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
-          '<span>' + (b.champion || "?") + '</span>' +
-        '</div>'
-      ).join("") + '</div>';
-  } else if (!hasChamp) {
-    h += '<div class="aram-wait">aguardando os campeoes...</div>';
+    h += '<div class="aram-sec">' + title + '</div>' +
+      '<div class="bench-grid cards">' + benchOnly.map(card).join("") + '</div>';
+  } else if (!hasChamp && !hasSubset && !hasBench) {
+    // Primeiros instantes: nem subset nem roleta ainda. A LCU leva um tico.
+    h += '<div class="aram-wait">sorteando campeoes... aguarde os campeoes aparecerem</div>';
   }
 
   // Trocas com aliados (quando o modo permite)
@@ -844,6 +1016,7 @@ async function tick() {
       content.style.display = "block";
       leave.style.display = "none";
       idleExtra.innerHTML = "";
+      { const qp = document.getElementById("queue-panel"); if (qp) qp.innerHTML = ""; }
       phaseEl.classList.remove("flash");
       queue.textContent = "OK";
       label.textContent = "partida aceita";
@@ -854,6 +1027,7 @@ async function tick() {
       card.classList.remove("wide");
       content.style.display = "block";
       phaseEl.classList.remove("flash");
+      const queuePanel = document.getElementById("queue-panel");
       if (s.phase === "Matchmaking") {
         queue.style.display = "";
         label.style.display = "";
@@ -862,10 +1036,12 @@ async function tick() {
         leave.style.display = "block";
         leave.textContent = "Sair da fila";
         idleExtra.innerHTML = "";
+        if (queuePanel) queuePanel.innerHTML = "";  // em fila nao mostra o seletor
       } else {
         queue.style.display = "none";
         label.style.display = "none";
         leave.style.display = "none";
+        renderQueuePanel();  // criar fila / encontrar partida pelo celular
         loadIdleExtra();
       }
     }
@@ -888,5 +1064,13 @@ function stopLivePoll() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
 }
 
-setInterval(tick, 700);
+// Tick adaptativo: o backend ja recebe os eventos da LCU em tempo real (via
+// WebSocket), entao nas fases sensiveis (ready-check, champ select / roleta do
+// ARAM) buscamos o /status mais rapido para a tela acompanhar sem lag.
+const FAST_TICK_PHASES = ["ReadyCheck", "ChampSelect"];
+function scheduleTick() {
+  const delay = FAST_TICK_PHASES.includes(currentPhase) ? 350 : 700;
+  setTimeout(async () => { try { await tick(); } finally { scheduleTick(); } }, delay);
+}
 tick();
+scheduleTick();

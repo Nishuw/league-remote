@@ -308,6 +308,71 @@ body::before {
 .tradebtn.no { background: transparent; border-color: var(--red-deep); color: var(--red); }
 .trade-state { font-size: 12px; color: var(--muted); }
 
+/* ---- Toast (feedback de acoes) ---- */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(22px + var(--safe-bottom)); z-index: 60; max-width: 86%;
+  padding: 12px 18px; border-radius: 12px; font-size: 14px; font-weight: 600; text-align: center;
+  box-shadow: var(--shadow); animation: toast-in .16s ease; pointer-events: none;
+}
+.toast.ok { background: linear-gradient(180deg, #15324a, var(--surface)); color: var(--gold-bright); border: 1px solid var(--gold-deep); }
+.toast.err { background: linear-gradient(180deg, #3a1822, var(--surface)); color: var(--red); border: 1px solid var(--red-deep); }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ---- Feiticos + skin (ARAM) ---- */
+.aram-time { font-family: "Inter", sans-serif; font-size: 12px; font-weight: 700; color: var(--muted-2); margin-left: 4px; }
+.aram-time.urgent { color: var(--red); }
+.aram-spells { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 12px 0 4px; }
+.spellbtn {
+  width: 46px; height: 46px; padding: 0; border-radius: 10px; cursor: pointer; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border); transition: transform .08s ease, border-color .15s ease;
+}
+.spellbtn img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.spellbtn:active { transform: scale(.92); border-color: var(--gold); }
+.skinbtn {
+  margin-left: 4px; padding: 0 16px; height: 46px; border-radius: 10px; cursor: pointer; font-size: 13px; font-weight: 700;
+  background: linear-gradient(180deg, var(--surface), var(--surface-2)); color: var(--gold); border: 1px solid var(--border-soft);
+}
+.skinbtn:active { transform: scale(.96); }
+
+/* ---- Bottom-sheet (seletor de feiticos/skin) ---- */
+.sheet { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; justify-content: flex-end; }
+.sheet-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .6); backdrop-filter: blur(2px); }
+.sheet-body {
+  position: relative; background: linear-gradient(180deg, var(--surface), var(--surface-2));
+  border-top: 1px solid var(--gold-deep); border-radius: 18px 18px 0 0; padding: 18px 16px calc(20px + var(--safe-bottom));
+  max-height: 72vh; overflow-y: auto; box-shadow: 0 -12px 40px rgba(0, 0, 0, .6);
+  animation: sheet-up .18s ease;
+}
+.sheet-body::before { content: ""; display: block; width: 40px; height: 4px; border-radius: 2px; background: var(--border); margin: 0 auto 14px; }
+@keyframes sheet-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.sheet-title { font-family: "Cinzel", serif; font-size: 15px; font-weight: 700; color: var(--gold); text-align: center; margin-bottom: 14px; letter-spacing: .5px; }
+.spell-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 10px; }
+.spellopt {
+  display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 8px 4px; border-radius: 10px; cursor: pointer;
+  background: var(--surface-3); border: 1px solid var(--border); transition: transform .08s ease, border-color .15s ease;
+}
+.spellopt img { width: 44px; height: 44px; border-radius: 9px; background: var(--border); }
+.spellopt span { font-size: 10px; color: var(--muted-2); text-align: center; line-height: 1.1; }
+.spellopt:active { transform: scale(.94); }
+.spellopt.sel { border-color: var(--gold); box-shadow: 0 0 12px rgba(200, 170, 110, .3); }
+.spellopt.sel span { color: var(--gold-bright); }
+.skin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+.skinopt {
+  position: relative; padding: 0; border-radius: 10px; cursor: pointer; overflow: hidden;
+  background: var(--surface-3); border: 1px solid var(--border); transition: transform .08s ease, border-color .15s ease;
+}
+.skinopt img { width: 100%; aspect-ratio: 308/560; object-fit: cover; display: block; }
+.skinopt span {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 6px 5px; font-size: 10px; color: var(--gold-bright);
+  text-align: center; background: linear-gradient(180deg, transparent, rgba(0, 0, 0, .85));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.skinopt:active { transform: scale(.96); }
+.skinopt.sel { border-color: var(--gold); box-shadow: 0 0 14px rgba(200, 170, 110, .4); }
+.skinopt.locked { opacity: .5; }
+.skinopt.locked::after { content: "🔒"; position: absolute; top: 6px; right: 6px; font-size: 12px; }
+
 /* ---- Pick/ban ---- */
 .pickhead { font-family: "Cinzel", serif; font-size: 14px; font-weight: 700; color: var(--gold); text-align: center; margin: 16px 0 10px; letter-spacing: .8px; }
 #champ-search {
@@ -379,6 +444,28 @@ body::before {
 }
 #rune-save-name:focus { outline: none; border-color: var(--gold); }
 .savebtn { padding: 13px 16px; border: 1px solid var(--border); border-radius: 10px; font-weight: 700; background: #16202e; color: var(--gold); cursor: pointer; }
+
+/* ---- Seletor de filas (criar lobby / iniciar busca) ---- */
+#queue-panel:empty { display: none; }
+.qp-head { font-family: "Cinzel", serif; font-size: 13px; font-weight: 700; color: var(--gold); text-align: center; letter-spacing: .6px; margin: 6px 0 12px; }
+.qp-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+.qp-btn {
+  padding: 14px 10px; border-radius: 12px; cursor: pointer; font-size: 14px; font-weight: 600;
+  background: linear-gradient(180deg, var(--surface), var(--surface-2)); color: var(--gold-bright);
+  border: 1px solid var(--border-soft); transition: transform .08s ease, border-color .15s ease;
+}
+.qp-btn:active { transform: scale(.97); border-color: var(--gold); }
+.qp-actions { display: flex; gap: 10px; }
+.qp-start {
+  flex: 1; padding: 16px; border-radius: 12px; cursor: pointer; font-size: 16px; font-weight: 800; letter-spacing: .4px;
+  background: linear-gradient(180deg, #21d97a, var(--green-2)); color: #fff; border: 1px solid rgba(255, 255, 255, .18);
+}
+.qp-start:active { transform: scale(.98); }
+.qp-leave {
+  padding: 16px 18px; border-radius: 12px; cursor: pointer; font-size: 14px; font-weight: 600;
+  background: rgba(226, 87, 116, .06); color: var(--red); border: 1px solid var(--red-deep);
+}
+.qp-leave:active { transform: scale(.98); }
 
 /* ---- Elo / historico ---- */
 .rank-box { display: flex; gap: 10px; margin-top: 18px; }

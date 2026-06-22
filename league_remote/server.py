@@ -73,6 +73,50 @@ def create_app(monitor: Monitor) -> Flask:
         monitor.set_last_action("Saiu da fila pelo celular" if ok else "Falha ao sair da fila")
         return jsonify({"ok": ok})
 
+    # ------------------------------------------------------------------
+    # Lobby / iniciar fila pelo celular
+    # ------------------------------------------------------------------
+
+    @app.route("/lobby", methods=["GET"])
+    def lobby_get():
+        """Resumo do lobby atual (ou in_lobby=False se nao houver)."""
+        lob = client.get_lobby()
+        if not isinstance(lob, dict):
+            return jsonify({"in_lobby": False})
+        gc = lob.get("gameConfig") or {}
+        return jsonify({
+            "in_lobby": True,
+            "queue_id": gc.get("queueId"),
+            "can_start": bool(lob.get("canStartActivity")),
+            "members": len(lob.get("members") or []),
+        })
+
+    @app.route("/lobby", methods=["POST"])
+    def lobby_create():
+        """Cria um lobby para a fila informada (queueId)."""
+        data = request.get_json(force=True, silent=True) or {}
+        qid = data.get("queueId")
+        if qid is None:
+            return jsonify({"ok": False, "error": "queueId ausente"})
+        ok = client.create_lobby(int(qid))
+        monitor.set_last_action(
+            f"Lobby criado (fila {qid}) pelo celular" if ok else "Falha ao criar lobby"
+        )
+        return jsonify({"ok": ok})
+
+    @app.route("/lobby", methods=["DELETE"])
+    def lobby_leave():
+        ok = client.leave_lobby()
+        monitor.set_last_action("Saiu do lobby pelo celular" if ok else "Falha ao sair do lobby")
+        return jsonify({"ok": ok})
+
+    @app.route("/queue/start", methods=["POST"])
+    def queue_start():
+        """Inicia a busca por partida (Encontrar Partida)."""
+        ok = client.start_matchmaking()
+        monitor.set_last_action("Fila iniciada pelo celular" if ok else "Falha ao iniciar a fila")
+        return jsonify({"ok": ok})
+
     @app.route("/leave", methods=["POST"])
     def leave():
         """Sair de forma ciente da fase: cancela a fila ou da dodge no champ select."""
@@ -150,6 +194,8 @@ def create_app(monitor: Monitor) -> Flask:
                 "/lol-champ-select/v1/session/my-selection",
                 "/lol-champ-select/v1/all-grid-champions",
                 "/lol-champ-select/v1/disabled-champion-ids",
+                # Escolha inicial do ARAM/Desordem (subset pessoal de 2-3 champs).
+                "/lol-lobby-team-builder/champ-select/v1/subset-champion-list",
                 "/lol-champ-select-legacy/v1/session",
             )
         }
@@ -164,6 +210,75 @@ def create_app(monitor: Monitor) -> Flask:
             "gameflow": client.get_gameflow_session(),
         })
 
+    # ------------------------------------------------------------------
+    # Feiticos de invocador + skin (champ select)
+    # ------------------------------------------------------------------
+
+    # Feiticos permitidos no ARAM (Flash e Snowball primeiro, depois os comuns).
+    _ARAM_SPELLS = [4, 32, 7, 6, 21, 1, 3, 14, 13]
+
+    @app.route("/champ-select/spells", methods=["GET"])
+    def cs_spells_get():
+        client.load_summoner_spells()
+        session = client.get_champ_select_session() or {}
+        local = session.get("localPlayerCellId")
+        me = next((p for p in session.get("myTeam", []) or [] if p.get("cellId") == local), {})
+        options = [
+            {"id": sid, **(client.spell_map.get(sid) or {"name": str(sid), "icon": ""})}
+            for sid in _ARAM_SPELLS
+            if sid in client.spell_map
+        ]
+        return jsonify({
+            "spell1Id": me.get("spell1Id"),
+            "spell2Id": me.get("spell2Id"),
+            "options": options,
+        })
+
+    @app.route("/champ-select/spells", methods=["POST"])
+    def cs_spells_set():
+        data = request.get_json(force=True, silent=True) or {}
+        payload = {}
+        if data.get("spell1Id") is not None:
+            payload["spell1Id"] = int(data["spell1Id"])
+        if data.get("spell2Id") is not None:
+            payload["spell2Id"] = int(data["spell2Id"])
+        if not payload:
+            return jsonify({"ok": False, "error": "sem feiticos"})
+        ok = client.set_my_selection(payload)
+        monitor.set_last_action("Feiticos trocados pelo celular" if ok else "Falha ao trocar feiticos")
+        return jsonify({"ok": ok})
+
+    @app.route("/champ-select/skins", methods=["GET"])
+    def cs_skins_get():
+        session = client.get_champ_select_session() or {}
+        local = session.get("localPlayerCellId")
+        me = next((p for p in session.get("myTeam", []) or [] if p.get("cellId") == local), {})
+        skins = []
+        for sk in client.get_skin_carousel():
+            if not isinstance(sk, dict) or sk.get("id") is None:
+                continue
+            owned = sk.get("unlocked")
+            if owned is None:
+                owned = (sk.get("ownership") or {}).get("owned", False)
+            skins.append({
+                "id": sk.get("id"),
+                "name": sk.get("name") or "",
+                "disabled": bool(sk.get("disabled")),
+                "owned": bool(owned),
+                "tile": client.asset_url(sk.get("tilePath")),
+            })
+        return jsonify({"selectedSkinId": me.get("selectedSkinId"), "skins": skins})
+
+    @app.route("/champ-select/skin", methods=["POST"])
+    def cs_skin_set():
+        data = request.get_json(force=True, silent=True) or {}
+        sid = data.get("skinId")
+        if sid is None:
+            return jsonify({"ok": False, "error": "skinId ausente"})
+        ok = client.set_my_selection({"selectedSkinId": int(sid)})
+        monitor.set_last_action("Skin trocada pelo celular" if ok else "Falha ao trocar skin")
+        return jsonify({"ok": ok})
+
     @app.route("/aram/swap", methods=["POST"])
     def aram_swap():
         data = request.get_json(force=True, silent=True) or {}
@@ -171,19 +286,46 @@ def create_app(monitor: Monitor) -> Flask:
         if champion_id is None:
             return jsonify({"ok": False, "error": "championId ausente"})
         cid = int(champion_id)
-        # No ARAM/Desordem a escolha e sempre pelo banco (bench swap). Se ainda
-        # houver uma acao de pick em progresso (instante inicial sem campeao),
-        # cai pra completar a acao com o campeao escolhido.
-        ok = client.bench_swap(cid)
-        if not ok:
-            action = client.local_action()
-            if action.get("id") is not None and action.get("type") == "pick":
-                ok = client.patch_action(action["id"], cid, True)
-        monitor.set_last_action(
-            f"Pegou do banco: {client.champ_name(cid) or cid}"
-            if ok else "Falha ao trocar pelo banco"
+        # No ARAM/Desordem a chegada e um estado especial: voce NAO tem campeao
+        # (championId 0) e ha uma acao de "pick" em progresso. Os campeoes
+        # oferecidos vem em benchChampions, mas a escolha inicial precisa ser
+        # COMPLETADA pela acao de pick -- o bench/swap so funciona depois que
+        # voce ja tem um campeao para trocar. Por isso decidimos pelo estado:
+        session = client.get_champ_select_session() or {}
+        local_cell = session.get("localPlayerCellId")
+        my_champ = 0
+        for p in session.get("myTeam", []) or []:
+            if p.get("cellId") == local_cell:
+                my_champ = p.get("championId") or 0
+                break
+        action = client.local_action()
+        initial_pick = (
+            not my_champ
+            and action.get("type") == "pick"
+            and action.get("id") is not None
         )
-        return jsonify({"ok": ok})
+        print(
+            f"[aram] swap req champ={cid} local_cell={local_cell} "
+            f"my_champ={my_champ} action={action} initial_pick={initial_pick}"
+        )
+        if initial_pick:
+            # Escolha inicial: completa a acao de pick; se a LCU recusar, tenta
+            # o bench/swap como alternativa (a prova de balas).
+            ok = client.patch_action(action["id"], cid, True)
+            if not ok:
+                ok = client.bench_swap(cid)
+        else:
+            # Ja tem campeao: troca normal pelo banco.
+            ok = client.bench_swap(cid)
+            if not ok and action.get("id") is not None and action.get("type") == "pick":
+                ok = client.patch_action(action["id"], cid, True)
+        nome = client.champ_name(cid) or str(cid)
+        if ok:
+            msg = ("Travado: " if initial_pick else "Pego: ") + nome
+        else:
+            msg = f"Falhou ({client.last_status or '?'}) - {nome}"
+        monitor.set_last_action(msg + " [celular]")
+        return jsonify({"ok": ok, "status": client.last_status, "msg": msg})
 
     @app.route("/aram/trade", methods=["POST"])
     def aram_trade():
