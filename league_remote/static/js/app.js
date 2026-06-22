@@ -721,16 +721,37 @@ function ensureLiveLayout() {
     lastFeedSig = "";
   }
 }
-// A Live Client Data API do jogo atualiza ~1x/s; 1000ms mantem os numeros
-// frescos sem martelar o endpoint local.
-const LIVE_POLL_MS = 1000;
-let liveLoading = false;
+// Cadencia do poller ao vivo. O loop e auto-agendado (proxima busca so dispara
+// quando a anterior termina), entao a atualizacao fica REGULAR mesmo no celular
+// -- era isso que deixava o farm "as vezes rapido, as vezes nao".
+const LIVE_POLL_MS = 800;
+
+function liveTime(t) {
+  const m = Math.floor((t || 0) / 60), s = Math.floor((t || 0) % 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+
+// Uma linha do feed (estruturado): icones de autor/vitima + "Você ... (tempo)".
+function feedRow(e) {
+  const teamCls = e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : "");
+  const localCls = e.local ? " mine" : "";
+  const aIcon = e.a_cid ? '<img class="lfeed-ic" src="' + champIcon(e.a_cid) + '" onerror="this.style.display=\'none\'">' : "";
+  let body;
+  if (e.kind === "kill") {
+    const vIcon = e.v_cid ? '<img class="lfeed-ic vic" src="' + champIcon(e.v_cid) + '" onerror="this.style.display=\'none\'">' : "";
+    body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> eliminou</span>' + vIcon +
+      '<span class="lfeed-txt">' + e.v + (e.note ? ' <span class="lfeed-note">' + e.note + '</span>' : '') + '</span>';
+  } else if (e.kind === "multi" || e.kind === "ace") {
+    body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> <span class="lfeed-big">' + e.note + '</span></span>';
+  } else if (e.kind === "fb") {
+    body = aIcon + '<span class="lfeed-txt"><span class="lfeed-big">' + e.note + '</span> · <b>' + e.a + '</b></span>';
+  } else {
+    body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> pegou <span class="lfeed-obj">' + (e.note || "objetivo") + '</span></span>';
+  }
+  return '<div class="lfeed-row' + teamCls + localCls + '"><span class="lfeed-time">' + liveTime(e.t) + '</span>' + body + '</div>';
+}
+
 async function loadLive() {
-  // Trava por requisicao em andamento (em vez de janela de tempo): o poller
-  // dispara a cada 1s e cada chamada sempre busca, a menos que a anterior
-  // ainda nao tenha respondido. Evita o CS/KDA "travarem" por corrida de tempo.
-  if (liveLoading) return;
-  liveLoading = true;
   try {
     const d = await (await fetch("/live")).json();
     const live = document.getElementById("live");
@@ -740,7 +761,6 @@ async function loadLive() {
       return;
     }
     ensureLiveLayout();
-    const mins = Math.floor(d.game_time / 60), secs = d.game_time % 60;
     const teams = { ORDER: [], CHAOS: [] };
     d.players.forEach(p => { (teams[p.team] || (teams[p.team] = [])).push(p); });
     const obj = d.objectives || {};
@@ -750,8 +770,10 @@ async function loadLive() {
       const o = obj[t] || {};
       let s = '<span class="ob k">' + (tk[t] || 0) + ' abates</span>' +
               '<span class="ob">' + (o.towers || 0) + ' torres</span>' +
-              '<span class="ob">' + (o.dragons || 0) + ' dragoes</span>';
-      if (o.barons) s += '<span class="ob">' + o.barons + ' barao</span>';
+              '<span class="ob">' + (o.dragons || 0) + ' drag</span>';
+      if (o.grubs) s += '<span class="ob">' + o.grubs + ' larvas</span>';
+      if (o.heralds) s += '<span class="ob">' + o.heralds + ' arauto</span>';
+      if (o.barons) s += '<span class="ob bn">' + o.barons + ' barão</span>';
       return s;
     };
 
@@ -759,15 +781,17 @@ async function loadLive() {
       const icon = p.champion_id
         ? '<img src="' + champIcon(p.champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
         : '';
-      const status = p.dead
-        ? '<span class="ldead">morto ' + p.respawn + 's</span>'
-        : '';
-      return '<div class="lprow' + (p.dead ? ' isdead' : '') + '">' +
+      const status = p.dead ? '<span class="ldead">morto ' + p.respawn + 's</span>' : '';
+      const name = (p.is_local ? '★ ' : '') + (p.champion || p.name || "?");
+      const vis = (d.show_vision && p.vision != null) ? ' · ' + p.vision + ' vis' : '';
+      return '<div class="lprow' + (p.dead ? ' isdead' : '') + (p.is_local ? ' me' : '') + '">' +
         '<div class="lpava">' + icon + '<span class="llvl">' + (p.level || 0) + '</span></div>' +
-        '<span class="lc">' + (p.champion || p.name || "?") + status + '</span>' +
-        '<span class="lk">' + p.k + '/' + p.d + '/' + p.a + '</span>' +
-        '<span class="lcs">' + p.cs + ' cs</span>' +
-        '</div>';
+        '<div class="lpinfo">' +
+          '<div class="lpline"><span class="lc">' + name + status + '</span>' +
+            '<span class="lk">' + p.k + '/' + p.d + '/' + p.a + '<i> ' + p.kda + ' KDA</i></span></div>' +
+          '<div class="lpsub"><span>' + p.cs + ' cs · ' + p.csmin + '/min' + vis + '</span></div>' +
+        '</div>' +
+      '</div>';
     };
 
     const teamBlock = (arr, cls, title, tkey) =>
@@ -776,7 +800,7 @@ async function loadLive() {
         arr.map(prow).join("") +
       '</div>';
 
-    let h = '<div class="lhead"><span class="gt">' + mins + ':' + String(secs).padStart(2, "0") + '</span>';
+    let h = '<div class="lhead"><span class="gt">' + liveTime(d.game_time) + '</span>';
     if (d.map) h += '<span class="lmode">' + d.map + '</span>';
     if (d.your_gold != null) h += '<span class="lgold">' + d.your_gold + ' ouro</span>';
     h += '</div>';
@@ -784,31 +808,19 @@ async function loadLive() {
     h += teamBlock(teams.CHAOS || [], "enemy", "Time Vermelho", "CHAOS");
     document.getElementById("live-stats").innerHTML = h;
 
-    // Feed: so redesenha quando ha evento novo, para nao ficar piscando.
+    // Feed: so redesenha quando ha evento novo, para nao piscar nem perder scroll.
     const feed = Array.isArray(d.feed) ? d.feed : [];
-    const sig = feed.map(e => (e.t || 0) + e.txt).join("|");
+    const sig = feed.map(e => (e.t || 0) + (e.kind || "") + (e.a || "") + (e.v || "") + (e.note || "")).join("|");
     if (sig !== lastFeedSig) {
       lastFeedSig = sig;
       const fe = document.getElementById("live-feed");
-      if (!feed.length) {
-        fe.innerHTML = "";
-      } else {
-        fe.innerHTML = '<div class="lfeed"><div class="lfeed-t">Eventos</div>' +
-          feed.slice().reverse().map(e => {
-            const m = Math.floor((e.t || 0) / 60), s = Math.floor((e.t || 0) % 60);
-            const cls = "lfeed-row" + (e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : ""));
-            const ic = e.cid ? '<img class="lfeed-ic" src="' + champIcon(e.cid) + '" onerror="this.style.display=\'none\'">' : "";
-            return '<div class="' + cls + '">' +
-              '<span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' +
-              ic + '<span class="lfeed-txt">' + e.txt + '</span></div>';
-          }).join("") + '</div>';
-      }
+      fe.innerHTML = feed.length
+        ? '<div class="lfeed"><div class="lfeed-t">Eventos</div>' + feed.slice().reverse().map(feedRow).join("") + '</div>'
+        : "";
     }
   } catch (e) {
     document.getElementById("live").innerHTML = '<div class="loading">sem dados ao vivo (ative a API no jogo)</div>';
     lastFeedSig = "";
-  } finally {
-    liveLoading = false;
   }
 }
 
@@ -1052,16 +1064,25 @@ async function tick() {
   }
 }
 
-// Poller dedicado do painel ao vivo: roda em ~1s (independente do tick de UI
-// de 700ms) enquanto a partida esta em andamento, mantendo os numeros frescos.
+// Poller dedicado do painel ao vivo, AUTO-AGENDADO: a proxima busca so dispara
+// quando a anterior termina (+LIVE_POLL_MS). Diferente de setInterval, isso
+// nunca acumula chamadas nem "pula" um ciclo no celular -- a atualizacao do
+// farm/KDA fica regular em vez de "as vezes rapido, as vezes nao".
 let liveTimer = null;
+let livePolling = false;
 function startLivePoll() {
-  if (liveTimer) return;
-  loadLive(); // busca imediata ao entrar na partida
-  liveTimer = setInterval(loadLive, LIVE_POLL_MS);
+  if (livePolling) return;
+  livePolling = true;
+  const loop = async () => {
+    if (!livePolling) return;
+    await loadLive();
+    if (livePolling) liveTimer = setTimeout(loop, LIVE_POLL_MS);
+  };
+  loop(); // busca imediata ao entrar na partida
 }
 function stopLivePoll() {
-  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  livePolling = false;
+  if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
 }
 
 // Tick adaptativo: o backend ja recebe os eventos da LCU em tempo real (via

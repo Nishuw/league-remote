@@ -506,27 +506,43 @@ body::before {
 .lobj { display: flex; gap: 5px; flex-wrap: wrap; }
 .ob { font-size: 10px; color: var(--muted-2); background: var(--surface-3); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
 .ob.k { color: var(--gold); border-color: var(--border-soft); }
+.ob.bn { color: var(--teal); border-color: var(--teal-deep); }
 .lprow { display: flex; align-items: center; gap: 9px; padding: 7px 9px; background: var(--surface-2); border-radius: 9px; margin-bottom: 4px; text-align: left; border: 1px solid var(--border); }
 .lprow.isdead { opacity: .55; }
-.lpava { position: relative; flex: 0 0 32px; width: 32px; height: 32px; }
-.lpava img { width: 32px; height: 32px; border-radius: 7px; object-fit: cover; background: var(--border); }
+/* Destaque do jogador local ("você") na lista. */
+.lprow.me { border-color: var(--gold); background: linear-gradient(180deg, rgba(200,170,110,.12), var(--surface-2)); }
+.lpava { position: relative; flex: 0 0 34px; width: 34px; height: 34px; }
+.lpava img { width: 34px; height: 34px; border-radius: 7px; object-fit: cover; background: var(--border); }
+.lprow.me .lpava img { box-shadow: 0 0 0 2px var(--gold); }
 .llvl { position: absolute; bottom: -3px; right: -3px; font-size: 9px; font-weight: 800; color: #06121d; background: var(--gold); border-radius: 5px; padding: 0 4px; line-height: 14px; min-width: 14px; text-align: center; }
-.lprow .lc { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ldead { font-size: 10px; color: var(--red); margin-left: 6px; }
-.lprow .lk { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
-.lprow .lcs { font-size: 11px; color: var(--muted-2); width: 52px; text-align: right; }
+.lpinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lpline { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.lprow .lc { min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.lprow.me .lc { color: var(--gold-bright); }
+.ldead { font-size: 10px; color: var(--red); margin-left: 6px; font-weight: 500; }
+.lprow .lk { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; font-weight: 700; flex: 0 0 auto; }
+.lprow .lk i { font-style: normal; font-size: 10px; color: var(--muted); font-weight: 500; }
+.lpsub { font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .lfeed { margin-top: 14px; text-align: left; max-height: 240px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .lfeed-t { font-family: "Cinzel", serif; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--gold); margin-bottom: 6px; font-weight: 700; position: sticky; top: 0; background: var(--surface); padding: 2px 0; }
 .lfeed-row {
-  display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-2);
+  display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-2);
   padding: 6px 9px; background: var(--surface-2); border-radius: 7px; margin-bottom: 4px;
   border-left: 3px solid var(--border);
 }
 .lfeed-row.ally { border-left-color: var(--blue); }
 .lfeed-row.enemy { border-left-color: var(--red); }
-.lfeed-time { color: var(--teal); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+/* Evento que envolve voce: borda dourada e leve brilho. */
+.lfeed-row.mine { border-left-color: var(--gold); background: linear-gradient(90deg, rgba(200,170,110,.14), var(--surface-2)); }
+.lfeed-row b { color: var(--text); font-weight: 700; }
+.lfeed-row.mine b { color: var(--gold-bright); }
+.lfeed-time { color: var(--teal); font-variant-numeric: tabular-nums; flex: 0 0 auto; font-size: 11px; }
 .lfeed-ic { width: 22px; height: 22px; border-radius: 6px; flex: 0 0 auto; background: var(--border); }
-.lfeed-txt { min-width: 0; flex: 1; }
+.lfeed-ic.vic { opacity: .85; filter: grayscale(.3); }
+.lfeed-txt { min-width: 0; flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lfeed-note { color: var(--muted); font-size: 10px; }
+.lfeed-big { color: var(--gold); font-weight: 800; text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
+.lfeed-obj { color: var(--teal); font-weight: 700; }
 
 /* ---- Config / paineis ---- */
 .cfgbtn {

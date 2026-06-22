@@ -124,7 +124,8 @@ Hoje montamos/salvamos página manualmente. A LCU recomenda runas prontas.
 
 ## 7. Live Client Data API (porta 2999, sem auth) — durante a partida
 
-Hoje puxamos `allgamedata` inteiro. Há sub-rotas mais leves para polling:
+Puxamos `allgamedata` inteiro a cada ~800ms (poller auto-agendado). Há sub-rotas
+mais leves para polling:
 
 | | Endpoint | Para quê |
 |---|---|---|
@@ -134,12 +135,27 @@ Hoje puxamos `allgamedata` inteiro. Há sub-rotas mais leves para polling:
 | ➕ | `.../eventdata` | Só o feed de eventos (abates, objetivos) — ideal pro feed sem baixar o resto. |
 | ➕ | `.../playerscores?riotId=<nome>` | Placar de um jogador específico. |
 
+**O que extraímos do `allgamedata` (`/live`):**
+- `activePlayer.riotIdGameName` (ou `riotId`/`summonerName`) → identifica o
+  **jogador local** (vira "Você" na lista e no feed).
+- `allPlayers[].scores` → `kills/deaths/assists` (+ ratio KDA), `creepScore`
+  (+ CS/min calculado), `wardScore` → **visão** (só no Rift, `gameMode CLASSIC`).
+- `allPlayers[]` → `championName`, `team`, `level`, `isDead`, `respawnTimer`,
+  `position`.
+- `events.Events[]` → feed: `ChampionKill` (+`Assisters`), `Multikill`
+  (`KillStreak`), `FirstBlood`, `DragonKill` (`DragonType` → alma/soul),
+  `HeraldKill`, `HordeKill`/`VoidgrubKill` (larvas do vazio), `BaronKill`,
+  `TurretKilled`/`InhibKilled`, `Ace`, e a flag `Stolen` (objetivo roubado).
+- `gameData` → `gameTime`, `gameMode`, `mapName`.
+
 ---
 
 ## Prioridade sugerida
 
 1. ~~**Criar/iniciar fila pelo celular** (§1)~~ — ✅ **feito** (seletor de filas + Encontrar Partida).
 2. ~~**Feitiços + skin no champ select** (§3, `my-selection`)~~ — ✅ **feito** (bottom-sheet: feitiços tocáveis + carrossel de skins).
-3. **Runas recomendadas** (§4) — 1 toque em vez de montar do zero. ← próximo
-4. **Live API segmentada** (§7) — feed/stats mais leves e sem piscar.
-5. **Perfil na home + honra no pós-jogo** (§5, §6) — polimento.
+3. ~~**Painel ao vivo analítico** (§7)~~ — ✅ **feito** (jogador local = "Você",
+   KDA/CS-min/visão, almas/larvas/roubos no feed, poller auto-agendado).
+4. **Runas recomendadas** (§4) — 1 toque em vez de montar do zero. ← próximo
+5. **Live API segmentada** (§7) — `playerlist`/`eventdata` p/ payloads menores.
+6. **Perfil na home + honra no pós-jogo** (§5, §6) — polimento.

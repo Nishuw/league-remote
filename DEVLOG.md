@@ -155,13 +155,24 @@ Motivos da separação:
 
 ### Painel ao vivo (durante a partida)
 - Removi o aceitar/recusar quando a partida já está rolando.
-- Mostro **tempo de jogo, KDA, CS, nível, ouro, objetivos** (torres, dragões,
-  barão) e um **feed de eventos** (abates, multikills, first blood, etc.),
-  resolvendo autor/vítima pelo nome → campeão/ícone.
-- **Feed sem piscar**: só redesenho quando há evento novo (comparo uma
-  assinatura dos eventos), preservando a rolagem.
-- **Poller dedicado de 1s**, independente do tick de UI (700ms), que começa ao
-  entrar na partida e para ao sair.
+- Mostro **tempo de jogo, KDA (+ratio), CS, CS/min, visão, nível, ouro** e
+  **objetivos** (torres, dragões + **alma/soul**, **arautos**, **larvas do
+  vazio**, **barão**), além de um **feed de eventos** rico.
+- **Identifico o jogador local** pelo `activePlayer` da Live API: na lista e no
+  feed ele vira **"Você"**, com a linha destacada em dourado. No feed os abates
+  ficam **"Você eliminou Kalista · 12:34"** (ícones do autor e da vítima, contagem
+  de assist, multikills, first blood, roubos de objetivo).
+- **Visão (sentinelas)** só aparece no Rift (`gameMode == "CLASSIC"` → normal,
+  flex, ranked); no ARAM é escondida (não há wards). Vem do `wardScore`.
+- **Feed sem piscar**: feed agora é **estruturado** (campos `kind/a/v/note/...`
+  em vez de texto pronto), montado no front com ícones; só redesenho quando a
+  assinatura dos eventos muda, preservando a rolagem. Ordeno por tempo no backend.
+- **Poller auto-agendado** (≈800ms): a próxima busca só dispara quando a anterior
+  responde. Diferente de `setInterval`, **não acumula nem pula ciclos** no
+  celular — era isso que deixava o **farm "às vezes rápido, às vezes não"**.
+- **Mais info aproveitada da Live API:** `your_level`, `csmin` por jogador,
+  `kda` ratio, soul de dragão (`souls`), `HordeKill`/`VoidgrubKill` (larvas),
+  `Stolen` (objetivo roubado), tradução PT-BR dos tipos de dragão.
 
 ### UI/UX mobile
 - Tema escuro inspirado no visual Hextech/LoL, fontes **Cinzel + Inter**.
