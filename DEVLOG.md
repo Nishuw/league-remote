@@ -173,6 +173,22 @@ Motivos da separação:
 - **Mais info aproveitada da Live API:** `your_level`, `csmin` por jogador,
   `kda` ratio, soul de dragão (`souls`), `HordeKill`/`VoidgrubKill` (larvas),
   `Stolen` (objetivo roubado), tradução PT-BR dos tipos de dragão.
+- **Novas métricas analíticas (2ª rodada):**
+  - **Itens por jogador**: mini-ícones do build de cada um (scout do inimigo).
+    Ícone resolvido por um `item_map` carregado uma vez do
+    `/lol-game-data/assets/v1/items.json` (mesmo padrão dos feitiços).
+  - **Feitiços de invocador** por jogador (saber Flash/TP do inimigo), ícone
+    resolvido pelo `displayName` em `summoner-spells.json`.
+  - **Lead de ouro por time** = soma do **preço dos itens** equipados (a Live
+    API não expõe o ouro dos inimigos; o valor investido é um bom proxy).
+    Mostro o total por time e a **diferença** no cabeçalho ("Azul +2.3k").
+  - **Timers de Barão (180s) e Dragão Ancião (150s)**: derivados do último
+    `BaronKill`/`DragonKill` Elder; banner com **contagem regressiva local**
+    (ticker de 1s, sem refazer fetch) — saber quando o buff inimigo cai.
+  - **Progresso de alma**: "alma em 1" / "ALMA" a partir da contagem de dragões.
+- **Performance:** o bloco de stats só **re-monta o DOM quando a assinatura muda**
+  (igual ao feed). Sem isso, eram 60+ `<img>` de itens recriadas a cada 800ms —
+  travava o celular. O countdown dos buffs atualiza à parte, só o texto.
 
 ### UI/UX mobile
 - Tema escuro inspirado no visual Hextech/LoL, fontes **Cinzel + Inter**.
@@ -180,6 +196,27 @@ Motivos da separação:
   toque maiores, **manifest PWA**.
 - Indicador de **build** no rodapé para eu confirmar que o celular pegou o
   código novo.
+
+### Auto-pick / Auto-ban e Runas — UX mobile (refeito)
+- **Auto-pick/ban com chips de campeão (era `<select>`):** o `<select>` nativo
+  com 160+ campeões era horrível no celular (sem busca, sem ícone). Troquei por
+  **chips de prioridade** (1ª/2ª/3ª) — vazio = "+ adicionar", preenchido =
+  ícone + nome + (×). Tocar abre um **bottom-sheet com busca e grade de ícones**
+  (reaproveita o `#picker-modal`; função `openChampPicker`). Sem duplicados e a
+  prioridade compacta sozinha (sem buracos).
+- **Badge de estado** no botão "Auto-pick / Auto-ban": mostra `pick`/`ban`
+  (verde/vermelho) quando ativos, sem precisar abrir o painel. Carregado uma vez
+  no load (`/config`).
+- **Config sem `<select>`:** estado em `cfgState` no front; `saveConfig` sincroniza
+  os toggles do DOM e re-renderiza chips sem perder os switches.
+- **Runas recomendadas (1 toque):** novo `/rune-recommend` consome
+  `/lol-perks/v1/recommended-pages` e **normaliza** a estrutura (que varia entre
+  patches — `primaryPerkStyleId`/`primaryStyleId`, `perks`/`selectedPerkIds`,
+  ints ou dicts) pro mesmo formato do editor. UI lista cada recomendação com
+  **ícone das duas árvores + nome/posição** e aplica direto. Fora do champ select
+  vem vazio → mostro uma dica em vez de erro.
+- **Feedback via `toast`** (era `alert()`/`confirm()`) ao salvar/aplicar runa —
+  não bloqueia a tela no celular.
 
 ### Monitoramento em tempo real (WebSocket de eventos da LCU)
 - **Problema:** no ARAM/Desordem, ao chegar no champ select, os primeiros 2-3s

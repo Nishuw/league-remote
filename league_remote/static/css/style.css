@@ -388,6 +388,7 @@ body::before {
 }
 .lockbtn.ban { background: linear-gradient(180deg, #f07089, var(--red) 55%, var(--red-deep)); color: #fff; }
 .lockbtn:active { transform: scale(.97); }
+.lockbtn:disabled { background: #233040; color: var(--muted); cursor: not-allowed; box-shadow: none; border-color: transparent; opacity: .8; }
 .lockfull { width: 100%; margin-top: 12px; padding: 17px; border-radius: 12px; font-size: 17px; letter-spacing: 1px; }
 .grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(66px, 1fr)); gap: 6px;
@@ -523,6 +524,25 @@ body::before {
 .lprow .lk { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; font-weight: 700; flex: 0 0 auto; }
 .lprow .lk i { font-style: normal; font-size: 10px; color: var(--muted); font-weight: 500; }
 .lpsub { font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+/* Itens + feitiicos por jogador (scout do build inimigo). */
+.lpitems { display: flex; align-items: center; gap: 2px; margin-top: 3px; flex-wrap: wrap; }
+.lpitems .lit { width: 20px; height: 20px; border-radius: 4px; object-fit: cover; background: var(--surface-3); }
+.lpitems .lsp { width: 18px; height: 18px; border-radius: 4px; object-fit: cover; background: var(--surface-3); box-shadow: 0 0 0 1px var(--border); }
+.lpsep { width: 1px; align-self: stretch; background: var(--border); margin: 1px 3px; }
+/* Lead de ouro do time (proxy: ouro investido em itens). */
+.ltgold { font-size: 10px; font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; margin-left: 6px; }
+.lgdiff { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 1px 6px; border-radius: 6px; }
+.lgdiff.ally { color: var(--blue); background: rgba(90,140,220,.14); }
+.lgdiff.enemy { color: var(--red); background: rgba(220,90,90,.14); }
+.ob.soul { color: #d9a8ff; border-color: #6a4a8a; font-weight: 700; }
+/* Banner de buffs ativos (Barao / Anciao) com contagem regressiva. */
+.lbuffs { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 2px; }
+.lbuff { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 3px 8px; border-radius: 7px; border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.lbuff b { font-weight: 800; }
+.lbuff.baron { color: #c9a6ff; border-color: #6a4a8a; background: rgba(120,80,170,.16); }
+.lbuff.elder { color: #7ff5ea; border-color: var(--teal-deep); background: rgba(40,170,160,.14); }
+.lbuff .lbt { font-weight: 800; }
+.lbuff.gone { display: none; }
 .lfeed { margin-top: 14px; text-align: left; max-height: 240px; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .lfeed-t { font-family: "Cinzel", serif; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--gold); margin-bottom: 6px; font-weight: 700; position: sticky; top: 0; background: var(--surface); padding: 2px 0; }
 .lfeed-row {
@@ -557,15 +577,63 @@ body::before {
 }
 .cfg-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 13px 0; }
 .cfg-row label { font-size: 14px; color: var(--text); font-weight: 500; }
-.cfg-row select { padding: 10px; border-radius: 9px; background: var(--surface-3); color: var(--text); border: 1px solid var(--border); max-width: 180px; font-size: 15px; }
 .cfg-sub { font-size: 11px; color: var(--gold); text-transform: uppercase; letter-spacing: 1px; margin: 12px 0 8px; font-weight: 600; }
-.cfg-priority { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
-.cfg-prio-row { display: flex; align-items: center; gap: 10px; }
-.cfg-prio-n { flex: 0 0 64px; font-size: 12px; color: var(--muted-2); }
-.cfg-prio-row select { flex: 1; min-width: 0; max-width: none; padding: 11px; border-radius: 9px; background: var(--surface-3); color: var(--text); border: 1px solid var(--border); font-size: 15px; }
 .switch { position: relative; width: 48px; height: 27px; flex: 0 0 auto; }
 .switch input { display: none; }
 .slider { position: absolute; inset: 0; background: #2a3849; border-radius: 27px; transition: .2s; cursor: pointer; border: 1px solid rgba(0, 0, 0, .3); }
 .slider:before { content: ""; position: absolute; width: 21px; height: 21px; left: 3px; top: 2px; background: #fff; border-radius: 50%; transition: .2s; box-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
 .switch input:checked + .slider { background: linear-gradient(180deg, #21d97a, var(--green-2)); }
 .switch input:checked + .slider:before { transform: translateX(21px); }
+
+/* ---- Auto-pick/ban: chips de campeao (no lugar dos <select>) ---- */
+.cfg-hint { display: block; font-size: 10.5px; color: var(--muted); font-weight: 400; margin-top: 1px; }
+.cfg-div { height: 1px; background: var(--border); margin: 14px 0; opacity: .6; }
+.prio-chips { display: flex; flex-direction: column; gap: 7px; margin-bottom: 4px; }
+.pchip {
+  display: flex; align-items: center; gap: 9px; padding: 7px 9px; border-radius: 11px;
+  border: 1px solid var(--border); background: var(--surface-3); cursor: pointer; min-height: 46px;
+}
+.pchip:active { transform: scale(.99); }
+.pchip-n { flex: 0 0 22px; font-size: 12px; font-weight: 700; color: var(--gold); }
+.pchip img { width: 32px; height: 32px; border-radius: 7px; object-fit: cover; background: var(--border); }
+.pchip-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pchip.empty { border-style: dashed; color: var(--muted); }
+.pchip-add { flex: 1; font-size: 13px; color: var(--muted); }
+.pchip.filled.pick { border-color: var(--green-2); }
+.pchip.filled.ban { border-color: #7a3a3a; }
+.pchip-x {
+  flex: 0 0 auto; width: 28px; height: 28px; border-radius: 8px; border: none; cursor: pointer;
+  background: rgba(0,0,0,.25); color: var(--muted-2); font-size: 18px; line-height: 1; font-weight: 700;
+}
+.pchip-x:active { background: var(--red); color: #fff; }
+/* Badge de estado no botao Auto-pick/ban. */
+.cfg-badge { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.cfgb { font-style: normal; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px; padding: 2px 6px; border-radius: 6px; }
+.cfgb.pick { color: #06121d; background: linear-gradient(180deg, #21d97a, var(--green-2)); }
+.cfgb.ban { color: #fff; background: linear-gradient(180deg, #e06a6a, #b33); }
+/* Picker de campeao (sheet) para o auto-pick/ban. */
+.cp-search {
+  width: 100%; padding: 12px 14px; border-radius: 11px; border: 1px solid var(--border);
+  background: var(--surface-3); color: var(--text); font-size: 15px; margin-bottom: 10px;
+}
+.cp-remove {
+  width: 100%; padding: 11px; border-radius: 10px; border: 1px solid #7a3a3a; background: rgba(120,40,40,.18);
+  color: #e89090; font-size: 13px; font-weight: 600; cursor: pointer; margin-bottom: 10px;
+}
+.cp-grid { max-height: 52vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+/* ---- Runas recomendadas (1 toque) ---- */
+.runebtn.primary { color: var(--gold-bright); border-color: var(--gold); background: linear-gradient(180deg, rgba(200,170,110,.14), var(--surface-2)); font-weight: 700; }
+.rune-rec-empty { font-size: 12px; color: var(--muted); padding: 10px 4px; text-align: center; }
+.rune-rec-card {
+  display: flex; align-items: center; gap: 11px; padding: 10px; margin: 8px 0; border-radius: 12px;
+  border: 1px solid var(--border-soft); background: var(--surface-2); cursor: pointer; text-align: left;
+}
+.rune-rec-card:active { transform: scale(.99); }
+.rrc-icons { flex: 0 0 auto; position: relative; width: 44px; height: 38px; }
+.rrc-icons img { width: 38px; height: 38px; }
+.rrc-icons img.sub { position: absolute; right: -2px; bottom: -2px; width: 22px; height: 22px; background: var(--surface); border-radius: 50%; padding: 1px; }
+.rrc-meta { flex: 1; min-width: 0; }
+.rrc-name { font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rrc-sub { font-size: 11px; color: var(--muted-2); margin-top: 1px; }
+.rrc-apply { flex: 0 0 auto; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .5px; color: #06121d; background: linear-gradient(180deg, #7ff5ea, var(--teal)); padding: 7px 12px; border-radius: 9px; }

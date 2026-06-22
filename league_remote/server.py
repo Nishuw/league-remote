@@ -136,12 +136,23 @@ def create_app(monitor: Monitor) -> Flask:
 
     @app.route("/champ-options")
     def champ_options():
-        """Lista de campeoes disponiveis para a acao atual (pick ou ban)."""
+        """Lista de campeoes disponiveis para a acao atual (pick ou ban).
+
+        O tipo (pick/ban) prioriza o `?type=` que o monitor ja detectou (e o
+        celular ve na tela), caindo no GET fresco so como fallback. Evita a
+        grade vazia quando esse segundo GET discorda do snapshot do monitor.
+        """
         client.load_champion_data()
         session = client.get_champ_select_session() or {}
         is_bench = bool(session.get("benchEnabled"))
         action = client.local_action()
-        atype = action.get("type")
+        atype = (request.args.get("type") or action.get("type") or "").lower()
+        action_id = action.get("id")
+        if action_id is None and request.args.get("actionId") not in (None, ""):
+            try:
+                action_id = int(request.args.get("actionId"))
+            except (TypeError, ValueError):
+                action_id = None
         all_ids = [cid for cid in client.champ_map.keys() if cid and cid > 0]
         if atype == "ban":
             ids = client.get_bannable_champion_ids() or all_ids
@@ -151,12 +162,13 @@ def create_app(monitor: Monitor) -> Flask:
             # nao cai no fallback de "todos os campeoes". No draft normal sim.
             ids = pickable if (is_bench or pickable) else all_ids
         else:
-            ids = []
+            # Tipo desconhecido: melhor mostrar todos do que uma grade vazia.
+            ids = all_ids
         champs = sorted(
             ({"id": int(i), "name": client.champ_name(i) or str(i)} for i in ids),
             key=lambda c: c["name"],
         )
-        return jsonify({"type": atype, "action_id": action.get("id"), "champions": champs})
+        return jsonify({"type": atype or None, "action_id": action_id, "champions": champs})
 
     @app.route("/champ-action", methods=["POST"])
     def champ_action():
@@ -167,11 +179,18 @@ def create_app(monitor: Monitor) -> Flask:
         if champion_id is None:
             return jsonify({"ok": False, "error": "championId ausente"})
         action = client.local_action()
-        if not action.get("id"):
+        # Usa o actionId que o monitor ja validou (enviado pelo celular); cai no
+        # GET fresco so se nao veio. `is None` (e nao `not id`) porque a 1a acao
+        # do champ select tem id == 0 -- com `not id` o ban/pick falhava.
+        action_id = data.get("actionId")
+        if action_id is None:
+            action_id = action.get("id")
+        atype = (data.get("type") or action.get("type") or "").lower()
+        if action_id is None:
             return jsonify({"ok": False, "error": "nao e sua vez"})
-        ok = client.patch_action(action["id"], int(champion_id), complete)
+        ok = client.patch_action(int(action_id), int(champion_id), complete)
         if ok and complete:
-            verb = "Banido" if action.get("type") == "ban" else "Pick travado"
+            verb = "Banido" if atype == "ban" else "Pick travado"
             monitor.set_last_action(f"{verb} pelo celular")
         return jsonify({"ok": ok})
 
@@ -429,6 +448,49 @@ def create_app(monitor: Monitor) -> Flask:
         }
         return jsonify({"styles": out_styles, "shards": shards or [], "current": current})
 
+    @app.route("/rune-recommend")
+    def rune_recommend():
+        """Runas recomendadas pela Riot para o campeao atual (1 toque p/ aplicar).
+
+        Normaliza a estrutura (que muda entre patches) para o mesmo formato do
+        editor: primaryStyleId / subStyleId / selectedPerkIds, + nome/icone.
+        """
+        recs = client.get_recommended_rune_pages()
+        client.load_champion_data()
+        styles = {
+            int(s["id"]): {"name": s.get("name"), "icon": _perk_icon(s.get("iconPath", ""))}
+            for s in client.get_perk_styles() if "id" in s
+        }
+        out = []
+        for r in recs if isinstance(recs, list) else []:
+            if not isinstance(r, dict):
+                continue
+            primary = r.get("primaryPerkStyleId") or r.get("primaryStyleId")
+            sub = r.get("secondaryPerkStyleId") or r.get("subStyleId")
+            perks_raw = r.get("perks") or r.get("selectedPerkIds") or []
+            perks = []
+            for p in perks_raw:
+                pid = p.get("id") if isinstance(p, dict) else p
+                if pid:
+                    perks.append(int(pid))
+            if not primary or not sub or len(perks) != 9:
+                continue
+            cid = r.get("championId")
+            pos = (r.get("position") or "").replace("NONE", "").title()
+            out.append({
+                "champion_id": cid,
+                "champion": client.champ_name(cid),
+                "position": pos,
+                "primaryStyleId": int(primary),
+                "subStyleId": int(sub),
+                "selectedPerkIds": perks,
+                "primary_icon": (styles.get(int(primary)) or {}).get("icon", ""),
+                "sub_icon": (styles.get(int(sub)) or {}).get("icon", ""),
+                "primary_name": (styles.get(int(primary)) or {}).get("name", ""),
+                "sub_name": (styles.get(int(sub)) or {}).get("name", ""),
+            })
+        return jsonify(out)
+
     @app.route("/rune-apply", methods=["POST"])
     def rune_apply():
         data = request.get_json(force=True, silent=True) or {}
@@ -529,6 +591,8 @@ def create_app(monitor: Monitor) -> Flask:
             return jsonify({"in_game": False})
         game = data.get("gameData", {}) or {}
         client.load_champion_data()
+        client.load_summoner_spells()
+        client.load_item_data()
         name_to_id = {v: k for k, v in client.champ_map.items()}
         game_time = int(game.get("gameTime", 0) or 0)
         minutes = max(game_time / 60.0, 1 / 60.0)  # evita divisao por zero
@@ -552,6 +616,9 @@ def create_app(monitor: Monitor) -> Flask:
         pindex = {}
         players = []
         team_kills = {"ORDER": 0, "CHAOS": 0}
+        # Ouro investido em itens por time (proxy de vantagem economica -- a Live
+        # API nao expoe o ouro dos inimigos, mas o preco dos itens equipados sim).
+        team_gold = {"ORDER": 0, "CHAOS": 0}
         for p in data.get("allPlayers", []) or []:
             sc = p.get("scores", {}) or {}
             team = p.get("team")
@@ -569,6 +636,30 @@ def create_app(monitor: Monitor) -> Flask:
             cs = int(sc.get("creepScore", 0) or 0)
             if team in team_kills:
                 team_kills[team] += k
+
+            # Itens equipados (ordenados pelo slot) + ouro investido.
+            items = []
+            invested = 0
+            raw_items = sorted(p.get("items", []) or [], key=lambda i: i.get("slot", 0))
+            for it in raw_items:
+                iid = int(it.get("itemID", 0) or 0)
+                if not iid:
+                    continue
+                price = int(it.get("price", 0) or 0) * int(it.get("count", 1) or 1)
+                invested += price
+                items.append({"id": iid, "icon": client.item_icon(iid)})
+            if team in team_gold:
+                team_gold[team] += invested
+
+            # Feitiicos de invocador (icone) -- saber Flash/TP do inimigo ajuda.
+            spells = []
+            ss = p.get("summonerSpells", {}) or {}
+            for slot in ("summonerSpellOne", "summonerSpellTwo"):
+                nm = (ss.get(slot) or {}).get("displayName")
+                ic = client.spell_icon_by_name(nm)
+                if nm:
+                    spells.append({"name": nm, "icon": ic})
+
             players.append({
                 "name": gname,
                 "champion": cname,
@@ -584,6 +675,9 @@ def create_app(monitor: Monitor) -> Flask:
                 "dead": bool(p.get("isDead")),
                 "respawn": int(p.get("respawnTimer", 0) or 0),
                 "position": (p.get("position") or "").lower(),
+                "items": items,
+                "spells": spells,
+                "gold": invested,
             })
 
         def who(n):
@@ -606,6 +700,10 @@ def create_app(monitor: Monitor) -> Flask:
             "CHAOS": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "grubs": 0, "inhibs": 0, "souls": []},
         }
         multi_labels = {2: "Double Kill", 3: "Triple Kill", 4: "Quadra Kill", 5: "PENTA KILL"}
+        # Buffs ativos (Barao 3min, Dragao Anciao 2:30). Guardamos o ultimo kill
+        # e calculamos quanto falta -- saber quando o buff inimigo cai e ouro puro.
+        buff_baron = None   # {"team", "expires"}
+        buff_elder = None
         feed = []
         for ev in (data.get("events", {}) or {}).get("Events", []) or []:
             name = ev.get("EventName")
@@ -646,6 +744,8 @@ def create_app(monitor: Monitor) -> Flask:
                     objectives[tm]["dragons"] += 1
                     if dt and dt != "Elder":
                         objectives[tm]["souls"].append(dt_pt)
+                if dt == "Elder" and tm in objectives:
+                    buff_elder = {"team": tm, "expires": t + 150}
                 stolen = " (roubado!)" if ev.get("Stolen") == "True" else ""
                 feed.append({**base, "kind": "dragon", "note": f"Dragão {dt_pt}{stolen}".strip()})
             elif name == "HeraldKill":
@@ -660,6 +760,7 @@ def create_app(monitor: Monitor) -> Flask:
             elif name == "BaronKill":
                 if tm in objectives:
                     objectives[tm]["barons"] += 1
+                    buff_baron = {"team": tm, "expires": t + 180}
                 stolen = " (roubado!)" if ev.get("Stolen") == "True" else ""
                 feed.append({**base, "kind": "baron", "note": f"Barão{stolen}"})
             elif name == "Ace":
@@ -674,6 +775,22 @@ def create_app(monitor: Monitor) -> Flask:
         gold = active.get("currentGold") if isinstance(active, dict) else None
         active_level = active.get("level") if isinstance(active, dict) else None
 
+        # Buffs ativos: so retorna se ainda nao expirou (relativo ao gameTime).
+        buffs = []
+        for kind, label_pt, b in (("baron", "Barão", buff_baron), ("elder", "Ancião", buff_elder)):
+            if b and b["expires"] > game_time:
+                buffs.append({"kind": kind, "label": label_pt, "team": b["team"],
+                              "remaining": b["expires"] - game_time})
+
+        # Diferenca de ouro (investido em itens) ORDER - CHAOS.
+        gold_diff = team_gold["ORDER"] - team_gold["CHAOS"]
+
+        # Progresso da alma: 4 dragoes = alma. Marca quem esta a 1 do soul point.
+        for tk in ("ORDER", "CHAOS"):
+            d = objectives[tk]["dragons"]
+            objectives[tk]["soul_in"] = max(0, 4 - d) if d < 4 else 0
+            objectives[tk]["has_soul"] = d >= 4
+
         return jsonify({
             "in_game": True,
             "game_time": game_time,
@@ -681,7 +798,10 @@ def create_app(monitor: Monitor) -> Flask:
             "map": game.get("mapName"),
             "show_vision": show_vision,
             "team_kills": team_kills,
+            "team_gold": team_gold,
+            "gold_diff": gold_diff,
             "objectives": objectives,
+            "buffs": buffs,
             "your_gold": int(gold) if isinstance(gold, (int, float)) else None,
             "your_level": int(active_level) if isinstance(active_level, (int, float)) else None,
             "feed": feed[-24:],

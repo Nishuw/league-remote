@@ -46,7 +46,7 @@ pra montar a fila do zero e dar play remoto.
 |---|---|---|---|
 | ✅ | `POST` | `/lol-lobby/v2/lobby` | Cria lobby de uma fila. Body: `{"queueId": 450}` (450=ARAM, 430=normal, 420=ranked solo, 440=flex, 490=normal rápido, 2400=ARAM Desordem). |
 | ✅ | `GET` | `/lol-lobby/v2/lobby` | Estado do lobby atual (membros, fila, se pode iniciar). |
-| ✅ | `DELETE` | `/lol-lobby/v1/lobby` | Sair do lobby. |
+| ✅ | `DELETE` | `/lol-lobby/v2/lobby` | Sair do lobby (o `v1` retorna 404 — use `v2`). |
 | ✅ | `POST` | `/lol-lobby/v2/lobby/matchmaking/search` | **Iniciar a fila** (dar "Encontrar Partida"). |
 | ✅ | `DELETE` | `/lol-lobby/v1/lobby/matchmaking/search` | Cancelar a busca. |
 | ➕ | `GET` | `/lol-lobby/v2/received-invitations` | Convites recebidos. |
@@ -93,7 +93,7 @@ Hoje montamos/salvamos página manualmente. A LCU recomenda runas prontas.
 |---|---|---|---|
 | ✅ | `GET/PUT/POST` | `/lol-perks/v1/pages`, `/currentpage`, `/styles`, `/perks` | Ler/editar/criar/ativar páginas. |
 | ➕ | `GET` | `/lol-perks/v1/inventory` | Quantas páginas custom o jogador tem / pode criar. |
-| ➕ | `GET` | `/lol-perks/v1/recommended-pages` | Páginas de runa **recomendadas** para o campeão/posição atuais — aplicar com 1 toque. |
+| ✅ | `GET` | `/lol-perks/v1/recommended-pages` | Páginas de runa **recomendadas** para o campeão/posição atuais — aplicar com 1 toque. Normalizado em `/rune-recommend` (estrutura muda entre patches). Só vem populado no champ select com um campeão definido. |
 | ➕ | `POST` | `/lol-perks/v1/rune-recommender-auto-select` | Deixa o cliente escolher a runa recomendada automaticamente. |
 
 ---
@@ -146,6 +146,14 @@ mais leves para polling:
   (`KillStreak`), `FirstBlood`, `DragonKill` (`DragonType` → alma/soul),
   `HeraldKill`, `HordeKill`/`VoidgrubKill` (larvas do vazio), `BaronKill`,
   `TurretKilled`/`InhibKilled`, `Ace`, e a flag `Stolen` (objetivo roubado).
+- `allPlayers[].items[]` → `itemID`/`price`/`count` → **build de cada jogador**
+  (mini-ícones) + **ouro investido por time** (proxy de vantagem econômica, já
+  que a Live API não expõe o ouro dos inimigos). Ícone do item vem do
+  `/lol-game-data/assets/v1/items.json` da LCU (`item_map`, via `asset_url`).
+- `allPlayers[].summonerSpells` → `displayName` → **feitiços de cada jogador**
+  (saber Flash/TP do inimigo). Ícone resolvido pelo nome em `summoner-spells.json`.
+- **Buffs ativos** derivados dos eventos: `BaronKill` (+180s) e `DragonKill`
+  Elder (+150s) → quanto falta o buff inimigo cair (countdown local no celular).
 - `gameData` → `gameTime`, `gameMode`, `mapName`.
 
 ---
@@ -155,7 +163,13 @@ mais leves para polling:
 1. ~~**Criar/iniciar fila pelo celular** (§1)~~ — ✅ **feito** (seletor de filas + Encontrar Partida).
 2. ~~**Feitiços + skin no champ select** (§3, `my-selection`)~~ — ✅ **feito** (bottom-sheet: feitiços tocáveis + carrossel de skins).
 3. ~~**Painel ao vivo analítico** (§7)~~ — ✅ **feito** (jogador local = "Você",
-   KDA/CS-min/visão, almas/larvas/roubos no feed, poller auto-agendado).
-4. **Runas recomendadas** (§4) — 1 toque em vez de montar do zero. ← próximo
+   KDA/CS-min/visão, almas/larvas/roubos no feed, poller auto-agendado,
+   **itens/feitiços por jogador**, **lead de ouro por time**, **timers de
+   Barão/Ancião** com countdown, **progresso de alma**; render só re-monta o
+   DOM quando algo muda, p/ não travar o celular).
+4. ~~**Runas recomendadas** (§4)~~ — ✅ **feito** (`/lol-perks/v1/recommended-pages`
+   normalizado em `/rune-recommend`; lista com ícone das árvores + 1 toque pra
+   aplicar). UX do auto-pick/ban também refeita: **chips de campeão com busca**
+   (sheet) no lugar dos `<select>` nativos + badge de estado no botão.
 5. **Live API segmentada** (§7) — `playerlist`/`eventdata` p/ payloads menores.
 6. **Perfil na home + honra no pós-jogo** (§5, §6) — polimento.

@@ -105,7 +105,10 @@ async function startSearch() {
   tick();
 }
 async function leaveLobby() {
-  try { await fetch("/lobby", { method: "DELETE" }); toast("Saiu do lobby"); } catch (e) {}
+  try {
+    const j = await (await fetch("/lobby", { method: "DELETE" })).json();
+    toast(j.ok ? "Saiu do lobby" : "Falha ao sair do lobby", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
   renderQueuePanel(true); tick();
 }
 
@@ -251,6 +254,34 @@ function tradeButtons(t) {
 function closePicker() {
   const m = document.getElementById("picker-modal");
   if (m) m.hidden = true;
+  window.__cpPick = null;
+}
+// Picker de campeao reutilizavel (auto-pick/ban): grade com busca + ícone,
+// bem melhor no celular que o <select> nativo com 160+ campeoes.
+function openChampPicker(title, currentId, allowRemove, cb) {
+  const body = document.getElementById("picker-body");
+  document.getElementById("picker-modal").hidden = false;
+  const list = champListCache || [];
+  body.innerHTML =
+    '<div class="sheet-title">' + title + '</div>' +
+    '<input id="cp-search" class="cp-search" placeholder="buscar campeão..." oninput="filterCP()" autocomplete="off">' +
+    (allowRemove ? '<button class="cp-remove" onclick="window.__cpPick(null)">remover este campeão</button>' : '') +
+    '<div class="grid cp-grid" id="cp-grid">' +
+    list.map(c =>
+      '<div class="gitem' + (c.id === currentId ? ' sel' : '') + '" data-name="' + c.name.toLowerCase() + '" onclick="window.__cpPick(' + c.id + ')">' +
+        '<img loading="lazy" src="' + champIcon(c.id) + '" onerror="this.style.visibility=\'hidden\'">' +
+        '<span>' + c.name + '</span>' +
+      '</div>'
+    ).join("") +
+    '</div>';
+  window.__cpPick = (id) => { closePicker(); cb(id); };
+  setTimeout(() => { const s = document.getElementById("cp-search"); if (s) s.focus(); }, 60);
+}
+function filterCP() {
+  const q = document.getElementById("cp-search").value.toLowerCase();
+  document.querySelectorAll("#cp-grid .gitem").forEach(el => {
+    el.style.display = el.dataset.name.includes(q) ? "" : "none";
+  });
 }
 async function openSpellPicker(slot) {
   const body = document.getElementById("picker-body");
@@ -397,7 +428,9 @@ function renderChamp(cs) {
 }
 
 let csActionId = undefined;
+let csActionType = null;
 let csSelected = null;
+let csOptName = {};   // id->nome dos campeoes da acao atual (rotulo do botao)
 
 function ensureChampLayout() {
   const champ = document.getElementById("champ");
@@ -428,6 +461,7 @@ function resetChampLayout() {
   const champ = document.getElementById("champ");
   if (champ.innerHTML !== "") champ.innerHTML = "";
   csActionId = undefined;
+  csActionType = null;
   csSelected = null;
 }
 
@@ -435,31 +469,44 @@ async function loadChampControls(cs) {
   const ctr = document.getElementById("champ-controls");
   if (!ctr) return;
   if (!cs.is_my_turn) {
-    if (csActionId !== undefined) { ctr.innerHTML = ""; csActionId = undefined; csSelected = null; }
+    if (csActionId !== undefined) { ctr.innerHTML = ""; csActionId = undefined; csActionType = null; csSelected = null; }
     return;
   }
   if (cs.my_action_id === csActionId) return;
   csActionId = cs.my_action_id;
+  csActionType = cs.my_action_type || null;
   csSelected = null;
-  ctr.innerHTML = '<div class="loading">carregando campeoes...</div>';
+  csOptName = {};
+  ctr.innerHTML = '<div class="loading">carregando campeões...</div>';
   try {
-    const data = await (await fetch("/champ-options")).json();
-    const isBan = data.type === "ban";
+    // Passa o tipo/id que o monitor JA detectou; nao depende de um 2o GET que
+    // pode discordar e devolver grade vazia.
+    const q = "?type=" + encodeURIComponent(csActionType || "") +
+              "&actionId=" + encodeURIComponent(cs.my_action_id);
+    const data = await (await fetch("/champ-options" + q)).json();
+    const isBan = (csActionType || data.type) === "ban";
+    let champs = (data.champions && data.champions.length) ? data.champions : null;
+    // Fallback: se a LCU nao devolveu nada, usa a lista completa de campeoes.
+    if (!champs) {
+      if (!champListCache) { try { champListCache = await (await fetch("/champ-list")).json(); } catch (e) {} }
+      champs = champListCache || [];
+    }
+    champs.forEach(c => { csOptName[c.id] = c.name; });
     const verb = isBan ? "BANIR" : "TRAVAR";
     ctr.innerHTML =
-      '<div class="pickhead">' + (isBan ? "Quem voce quer banir?" : "Escolha seu campeao") + '</div>' +
-      '<input id="champ-search" placeholder="buscar campeao..." oninput="filterChamps()">' +
+      '<div class="pickhead">' + (isBan ? "Quem você quer banir?" : "Escolha seu campeão") + '</div>' +
+      '<input id="champ-search" placeholder="buscar campeão..." oninput="filterChamps()" autocomplete="off">' +
       '<div class="grid" id="champ-grid">' +
-        data.champions.map(c =>
+        champs.map(c =>
           '<div class="gitem" data-name="' + c.name.toLowerCase() + '" data-id="' + c.id + '" onclick="selectChamp(' + c.id + ')">' +
             '<img loading="lazy" src="' + champIcon(c.id) + '" onerror="this.style.visibility=\'hidden\'">' +
             '<span>' + c.name + '</span>' +
           '</div>'
         ).join("") +
       '</div>' +
-      '<button class="lockbtn ' + (isBan ? "ban" : "") + ' lockfull" id="lockbtn" onclick="doLock()">' + verb + '</button>';
+      '<button class="lockbtn ' + (isBan ? "ban" : "") + ' lockfull" id="lockbtn" disabled onclick="doLock()">' + verb + '</button>';
   } catch (e) {
-    ctr.innerHTML = '<div class="loading">erro ao carregar campeoes</div>';
+    ctr.innerHTML = '<div class="loading">erro ao carregar campeões</div>';
     csActionId = undefined;
   }
 }
@@ -476,10 +523,16 @@ async function selectChamp(id) {
   document.querySelectorAll("#champ-grid .gitem").forEach(el => {
     el.classList.toggle("sel", parseInt(el.dataset.id) === id);
   });
+  // Botao passa a mostrar o campeao escolhido: "BANIR Garen" / "TRAVAR Jinx".
+  const btn = document.getElementById("lockbtn");
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = (csActionType === "ban" ? "BANIR " : "TRAVAR ") + (csOptName[id] || "");
+  }
   try {
     await fetch("/champ-action", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ championId: id, complete: false })
+      body: JSON.stringify({ championId: id, complete: false, actionId: csActionId, type: csActionType })
     });
   } catch (e) {}
 }
@@ -492,9 +545,10 @@ async function doLock() {
   try {
     const j = await (await fetch("/champ-action", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ championId: csSelected, complete: true })
+      body: JSON.stringify({ championId: csSelected, complete: true, actionId: csActionId, type: csActionType })
     })).json();
     btn.textContent = j.ok ? "OK!" : "FALHOU";
+    if (!j.ok) toast(j.error || "falha ao confirmar", false);
   } catch (e) { btn.textContent = "ERRO"; }
   setTimeout(() => { if (btn) btn.textContent = original; }, 1500);
 }
@@ -504,10 +558,53 @@ function loadRunes() {
   if (!area || area.dataset.init) return;
   area.dataset.init = "1";
   area.innerHTML =
-    '<button class="runebtn" onclick="toggleRunes()">Paginas de runa salvas</button>' +
+    '<button class="runebtn primary" onclick="loadRecommended()">&#9733; Runas recomendadas</button>' +
+    '<div id="rune-rec"></div>' +
+    '<button class="runebtn" onclick="toggleRunes()">Páginas de runa salvas</button>' +
     '<div id="rune-list" hidden></div>' +
     '<button class="runebtn" onclick="toggleRuneEditor()">Montar runa</button>' +
     '<div id="rune-editor" hidden></div>';
+}
+
+// Runas recomendadas pela Riot para o campeao atual (so durante o champ select).
+// 1 toque aplica direto -- ideal no celular durante a selecao.
+async function loadRecommended() {
+  const box = document.getElementById("rune-rec");
+  if (!box) return;
+  if (box.dataset.open === "1") { box.dataset.open = ""; box.innerHTML = ""; return; }
+  box.dataset.open = "1";
+  box.innerHTML = '<div class="loading">buscando recomendações...</div>';
+  let recs = [];
+  try { recs = await (await fetch("/rune-recommend")).json(); } catch (e) {}
+  if (!Array.isArray(recs) || !recs.length) {
+    box.innerHTML = '<div class="rune-rec-empty">Entre no champ select e escolha um campeão para ver runas recomendadas.</div>';
+    return;
+  }
+  box.innerHTML = recs.map((r, i) =>
+    '<div class="rune-rec-card" onclick="applyRecommended(' + i + ')">' +
+      '<div class="rrc-icons">' +
+        (r.primary_icon ? '<img src="' + r.primary_icon + '" onerror="this.style.display=\'none\'">' : '') +
+        (r.sub_icon ? '<img class="sub" src="' + r.sub_icon + '" onerror="this.style.display=\'none\'">' : '') +
+      '</div>' +
+      '<div class="rrc-meta"><div class="rrc-name">' + (r.champion || "Recomendada") +
+        (r.position ? ' · ' + r.position : '') + '</div>' +
+        '<div class="rrc-sub">' + (r.primary_name || '') + (r.sub_name ? ' + ' + r.sub_name : '') + '</div></div>' +
+      '<span class="rrc-apply">aplicar</span>' +
+    '</div>'
+  ).join("");
+  window.__recCache = recs;
+}
+
+async function applyRecommended(i) {
+  const r = (window.__recCache || [])[i];
+  if (!r) return;
+  try {
+    const j = await (await fetch("/rune-apply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ primaryStyleId: r.primaryStyleId, subStyleId: r.subStyleId, selectedPerkIds: r.selectedPerkIds })
+    })).json();
+    toast(j.ok ? "Runa recomendada aplicada" : "Falha ao aplicar runa", j.ok);
+  } catch (e) { toast("erro de conexão", false); }
 }
 
 async function renderRuneList() {
@@ -649,16 +746,16 @@ function renderRuneEditor() {
 }
 
 async function saveRunePage() {
-  if (!runeValid()) { alert("Monte a runa completa antes de salvar."); return; }
+  if (!runeValid()) { toast("Monte a runa completa antes de salvar", false); return; }
   const name = (document.getElementById("rune-save-name").value || "").trim();
-  if (!name) { alert("Digite um nome para a pagina."); return; }
+  if (!name) { toast("Digite um nome para a página", false); return; }
   try {
     const j = await (await fetch("/rune-save", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, primaryStyleId: runeSel.primary, subStyleId: runeSel.sub, selectedPerkIds: buildPerkIds() })
     })).json();
-    alert(j.ok ? "Pagina '" + name + "' salva!" : "Falha ao salvar.");
-  } catch (e) { alert("Erro ao salvar."); }
+    toast(j.ok ? "Página '" + name + "' salva!" : "Falha ao salvar", j.ok);
+  } catch (e) { toast("erro ao salvar", false); }
 }
 
 function pickPrimary(id) {
@@ -714,12 +811,43 @@ async function applyRunes() {
 
 // ---- Painel ao vivo ----
 let lastFeedSig = "";
+let lastStatSig = "";
+let liveBuffs = [];          // buffs ativos com {end} (timestamp local) p/ countdown
+let buffTicker = null;
 function ensureLiveLayout() {
   const live = document.getElementById("live");
   if (!document.getElementById("live-stats")) {
     live.innerHTML = '<div id="live-stats"></div><div id="live-feed"></div>';
     lastFeedSig = "";
+    lastStatSig = "";
   }
+}
+
+// Tempo restante (s) de um buff a partir do timestamp local de expiracao.
+function buffLeft(b) {
+  return Math.max(0, Math.round((b.end - Date.now()) / 1000));
+}
+function buffChip(b) {
+  const cls = b.kind === "baron" ? "baron" : "elder";
+  const side = b.team === "ORDER" ? "Azul" : "Vermelho";
+  return '<span class="lbuff ' + cls + '" data-end="' + b.end + '">' +
+    '<b>' + b.label + '</b> ' + side + ' <span class="lbt">' + liveTime(buffLeft(b)) + '</span></span>';
+}
+// Atualiza so o texto do countdown a cada 1s, sem reconstruir o painel todo.
+function startBuffTicker() {
+  if (buffTicker) return;
+  buffTicker = setInterval(() => {
+    const box = document.getElementById("lbuffs");
+    if (!box) return;
+    let live = false;
+    box.querySelectorAll(".lbuff").forEach(el => {
+      const left = Math.max(0, Math.round((Number(el.dataset.end) - Date.now()) / 1000));
+      const t = el.querySelector(".lbt");
+      if (t) t.textContent = liveTime(left);
+      if (left <= 0) el.classList.add("gone"); else live = true;
+    });
+    if (!live) { clearInterval(buffTicker); buffTicker = null; }
+  }, 1000);
 }
 // Cadencia do poller ao vivo. O loop e auto-agendado (proxima busca so dispara
 // quando a anterior termina), entao a atualizacao fica REGULAR mesmo no celular
@@ -758,6 +886,7 @@ async function loadLive() {
     if (!d.in_game) {
       live.innerHTML = '<div class="loading">carregando dados da partida...</div>';
       lastFeedSig = "";
+      lastStatSig = "";
       return;
     }
     ensureLiveLayout();
@@ -774,7 +903,19 @@ async function loadLive() {
       if (o.grubs) s += '<span class="ob">' + o.grubs + ' larvas</span>';
       if (o.heralds) s += '<span class="ob">' + o.heralds + ' arauto</span>';
       if (o.barons) s += '<span class="ob bn">' + o.barons + ' barão</span>';
+      if (o.has_soul) s += '<span class="ob soul">ALMA</span>';
+      else if (o.soul_in === 1) s += '<span class="ob soul">alma em 1</span>';
       return s;
+    };
+
+    // Mini- icones de itens (cap 6 slots) + feitiicos de invocador.
+    const itemRow = (p) => {
+      const its = (p.items || []).filter(i => i.icon).slice(0, 6)
+        .map(i => '<img class="lit" src="' + i.icon + '" loading="lazy" onerror="this.style.display=\'none\'">').join("");
+      const sps = (p.spells || []).filter(s => s.icon)
+        .map(s => '<img class="lsp" src="' + s.icon + '" title="' + (s.name || "") + '" loading="lazy" onerror="this.style.display=\'none\'">').join("");
+      if (!its && !sps) return "";
+      return '<div class="lpitems">' + sps + (sps && its ? '<span class="lpsep"></span>' : '') + its + '</div>';
     };
 
     const prow = (p) => {
@@ -784,29 +925,57 @@ async function loadLive() {
       const status = p.dead ? '<span class="ldead">morto ' + p.respawn + 's</span>' : '';
       const name = (p.is_local ? '★ ' : '') + (p.champion || p.name || "?");
       const vis = (d.show_vision && p.vision != null) ? ' · ' + p.vision + ' vis' : '';
+      const gold = p.gold ? ' · ' + (p.gold / 1000).toFixed(1) + 'k' : '';
       return '<div class="lprow' + (p.dead ? ' isdead' : '') + (p.is_local ? ' me' : '') + '">' +
         '<div class="lpava">' + icon + '<span class="llvl">' + (p.level || 0) + '</span></div>' +
         '<div class="lpinfo">' +
           '<div class="lpline"><span class="lc">' + name + status + '</span>' +
             '<span class="lk">' + p.k + '/' + p.d + '/' + p.a + '<i> ' + p.kda + ' KDA</i></span></div>' +
-          '<div class="lpsub"><span>' + p.cs + ' cs · ' + p.csmin + '/min' + vis + '</span></div>' +
+          '<div class="lpsub"><span>' + p.cs + ' cs · ' + p.csmin + '/min' + vis + gold + '</span></div>' +
+          itemRow(p) +
         '</div>' +
       '</div>';
     };
 
-    const teamBlock = (arr, cls, title, tkey) =>
-      '<div class="lteam ' + cls + '">' +
-        '<div class="lthead"><h4>' + title + '</h4><div class="lobj">' + objLine(tkey) + '</div></div>' +
+    // Cabecalho do time: titulo + ouro investido + objetivos.
+    const teamBlock = (arr, cls, title, tkey) => {
+      const tg = (d.team_gold || {})[tkey];
+      const goldTag = tg != null ? '<span class="ltgold">' + (tg / 1000).toFixed(1) + 'k</span>' : '';
+      return '<div class="lteam ' + cls + '">' +
+        '<div class="lthead"><h4>' + title + goldTag + '</h4><div class="lobj">' + objLine(tkey) + '</div></div>' +
         arr.map(prow).join("") +
       '</div>';
+    };
+
+    // Banner de buffs ativos (Barao/Anciao) com contagem regressiva local.
+    let buffH = "";
+    liveBuffs = (d.buffs || []).map(b => ({ ...b, end: Date.now() + b.remaining * 1000 }));
+    if (liveBuffs.length) {
+      buffH = '<div class="lbuffs" id="lbuffs">' + liveBuffs.map(buffChip).join("") + '</div>';
+      startBuffTicker();
+    }
 
     let h = '<div class="lhead"><span class="gt">' + liveTime(d.game_time) + '</span>';
     if (d.map) h += '<span class="lmode">' + d.map + '</span>';
+    // Lead de ouro do time (proxy: ouro investido em itens).
+    if (d.gold_diff) {
+      const ahead = d.gold_diff > 0 ? "ally" : "enemy";
+      const who = d.gold_diff > 0 ? "Azul" : "Vermelho";
+      h += '<span class="lgdiff ' + ahead + '">' + who + ' +' + (Math.abs(d.gold_diff) / 1000).toFixed(1) + 'k</span>';
+    }
     if (d.your_gold != null) h += '<span class="lgold">' + d.your_gold + ' ouro</span>';
     h += '</div>';
+    h += buffH;
     h += teamBlock(teams.ORDER || [], "ally", "Time Azul", "ORDER");
     h += teamBlock(teams.CHAOS || [], "enemy", "Time Vermelho", "CHAOS");
-    document.getElementById("live-stats").innerHTML = h;
+
+    // Performance: so reconstroi o DOM se algo relevante mudou (evita thrash de
+    // 60+ imgs a cada 800ms no celular). O contador de buff atualiza a parte.
+    const statSig = h;
+    if (statSig !== lastStatSig) {
+      lastStatSig = statSig;
+      document.getElementById("live-stats").innerHTML = h;
+    }
 
     // Feed: so redesenha quando ha evento novo, para nao piscar nem perder scroll.
     const feed = Array.isArray(d.feed) ? d.feed : [];
@@ -821,6 +990,7 @@ async function loadLive() {
   } catch (e) {
     document.getElementById("live").innerHTML = '<div class="loading">sem dados ao vivo (ative a API no jogo)</div>';
     lastFeedSig = "";
+    lastStatSig = "";
   }
 }
 
@@ -866,63 +1036,120 @@ async function toggleConfig() {
     if (!champListCache) champListCache = await (await fetch("/champ-list")).json();
     const cfg = await (await fetch("/config")).json();
     renderConfig(cfg);
+    updateCfgBadge();
   } else {
     panel.hidden = true;
   }
 }
 
-function champOptions(selected) {
-  return '<option value="">-- nenhum --</option>' +
-    champListCache.map(c => '<option value="' + c.id + '"' + (c.id === selected ? " selected" : "") + '>' + c.name + '</option>').join("");
+const PRIO_LBL = ["1ª", "2ª", "3ª"];
+let cfgState = {
+  auto_pick_enabled: false, auto_ban_enabled: false, ban_protect_allies: false,
+  auto_pick_champs: [], auto_ban_champs: [],
+};
+
+function champNameById(id) {
+  const c = (champListCache || []).find(x => x.id === id);
+  return c ? c.name : ("#" + id);
 }
 
-const PRIORITY_LABELS = ["1a opcao", "2a opcao", "3a opcao"];
-
-function prioritySelects(prefix, list) {
-  list = list || [];
-  let h = "";
-  for (let i = 0; i < PRIORITY_LABELS.length; i++) {
-    h += '<div class="cfg-prio-row"><span class="cfg-prio-n">' + PRIORITY_LABELS[i] + '</span>' +
-      '<select id="' + prefix + '-' + i + '" onchange="saveConfig()">' + champOptions(list[i] != null ? list[i] : null) + '</select></div>';
+// Linha de chips de prioridade: campeao escolhido = ícone + nome + (×); vazio =
+// "+ adicionar". Toque abre o picker de campeao com busca.
+function prioChips(kind) {
+  const arr = (kind === "pick" ? cfgState.auto_pick_champs : cfgState.auto_ban_champs) || [];
+  let h = '<div class="prio-chips">';
+  for (let i = 0; i < 3; i++) {
+    const id = arr[i] != null ? arr[i] : null;
+    if (id) {
+      h += '<div class="pchip filled ' + kind + '" onclick="pickPrio(\'' + kind + '\',' + i + ')">' +
+        '<span class="pchip-n">' + PRIO_LBL[i] + '</span>' +
+        '<img src="' + champIcon(id) + '" onerror="this.style.display=\'none\'">' +
+        '<span class="pchip-name">' + champNameById(id) + '</span>' +
+        '<button class="pchip-x" onclick="event.stopPropagation();setPrio(\'' + kind + '\',' + i + ',null)">×</button>' +
+      '</div>';
+    } else {
+      h += '<div class="pchip empty" onclick="pickPrio(\'' + kind + '\',' + i + ')">' +
+        '<span class="pchip-n">' + PRIO_LBL[i] + '</span><span class="pchip-add">+ adicionar</span></div>';
+    }
   }
-  return h;
+  return h + '</div>';
 }
 
-function collectPriority(prefix) {
-  const out = [];
-  for (let i = 0; i < PRIORITY_LABELS.length; i++) {
-    const el = document.getElementById(prefix + "-" + i);
-    const v = el && el.value ? parseInt(el.value) : null;
-    if (v && !out.includes(v)) out.push(v);
+function pickPrio(kind, slot) {
+  const arr = kind === "pick" ? cfgState.auto_pick_champs : cfgState.auto_ban_champs;
+  const cur = arr[slot] != null ? arr[slot] : null;
+  const verbo = kind === "pick" ? "Auto-pick" : "Auto-ban";
+  openChampPicker(verbo + " — " + PRIO_LBL[slot] + " opção", cur, cur != null,
+    (id) => setPrio(kind, slot, id));
+}
+
+function setPrio(kind, slot, id) {
+  const src = kind === "pick" ? cfgState.auto_pick_champs : cfgState.auto_ban_champs;
+  const arr = src.slice();
+  if (id == null) {
+    arr.splice(slot, 1);                 // remove e compacta
+  } else {
+    const dup = arr.indexOf(id);
+    if (dup !== -1 && dup !== slot) arr.splice(dup, 1);  // sem duplicado
+    arr[slot] = id;
   }
-  return out;
+  const clean = arr.filter(x => x != null);  // prioridade nao tem buracos
+  if (kind === "pick") cfgState.auto_pick_champs = clean; else cfgState.auto_ban_champs = clean;
+  renderConfig(cfgState);
+  saveConfig();
 }
 
 function renderConfig(cfg) {
+  if (cfg && cfg !== cfgState) {
+    cfgState = {
+      auto_pick_enabled: !!cfg.auto_pick_enabled,
+      auto_ban_enabled: !!cfg.auto_ban_enabled,
+      ban_protect_allies: !!cfg.ban_protect_allies,
+      auto_pick_champs: (cfg.auto_pick_champs || []).slice(),
+      auto_ban_champs: (cfg.auto_ban_champs || []).slice(),
+    };
+  }
   const panel = document.getElementById("cfg-panel");
   panel.innerHTML =
-    '<div class="cfg-row"><label>Auto-pick</label>' +
-      '<label class="switch"><input type="checkbox" id="cfg-pick-on" ' + (cfg.auto_pick_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
-    '<div class="cfg-sub">Campeoes (ordem de prioridade)</div>' +
-    '<div class="cfg-priority">' + prioritySelects("cfg-pick", cfg.auto_pick_champs) + '</div>' +
-    '<div class="cfg-row"><label>Auto-ban</label>' +
-      '<label class="switch"><input type="checkbox" id="cfg-ban-on" ' + (cfg.auto_ban_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
-    '<div class="cfg-sub">Campeoes (ordem de prioridade)</div>' +
-    '<div class="cfg-priority">' + prioritySelects("cfg-ban", cfg.auto_ban_champs) + '</div>' +
-    '<div class="cfg-row"><label>Nao banir pick de aliado</label>' +
-      '<label class="switch"><input type="checkbox" id="cfg-protect" ' + (cfg.ban_protect_allies ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
-    '<div class="muted" style="font-size:11px;margin-top:6px">Tenta na ordem e pula quem ja foi banido/escolhido. Se nenhum estiver disponivel, a selecao manual aparece na sua vez.</div>';
+    '<div class="cfg-row"><label>Auto-pick <span class="cfg-hint">trava o campeão na sua vez</span></label>' +
+      '<label class="switch"><input type="checkbox" id="cfg-pick-on" ' + (cfgState.auto_pick_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
+    '<div class="cfg-sub">Prioridade de pick</div>' + prioChips("pick") +
+    '<div class="cfg-div"></div>' +
+    '<div class="cfg-row"><label>Auto-ban <span class="cfg-hint">bane na sua vez de banir</span></label>' +
+      '<label class="switch"><input type="checkbox" id="cfg-ban-on" ' + (cfgState.auto_ban_enabled ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
+    '<div class="cfg-sub">Prioridade de ban</div>' + prioChips("ban") +
+    '<div class="cfg-row"><label>Não banir pick de aliado</label>' +
+      '<label class="switch"><input type="checkbox" id="cfg-protect" ' + (cfgState.ban_protect_allies ? "checked" : "") + ' onchange="saveConfig()"><span class="slider"></span></label></div>' +
+    '<div class="muted" style="font-size:11px;margin-top:6px">Tenta na ordem e pula quem já foi banido/escolhido. Se nenhum estiver livre, a seleção manual aparece na sua vez.</div>';
 }
 
 async function saveConfig() {
-  const body = {
-    auto_pick_enabled: document.getElementById("cfg-pick-on").checked,
-    auto_ban_enabled: document.getElementById("cfg-ban-on").checked,
-    ban_protect_allies: document.getElementById("cfg-protect").checked,
-    auto_pick_champs: collectPriority("cfg-pick"),
-    auto_ban_champs: collectPriority("cfg-ban"),
-  };
-  try { await fetch("/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); } catch (e) {}
+  cfgState.auto_pick_enabled = document.getElementById("cfg-pick-on").checked;
+  cfgState.auto_ban_enabled = document.getElementById("cfg-ban-on").checked;
+  cfgState.ban_protect_allies = document.getElementById("cfg-protect").checked;
+  updateCfgBadge();
+  try {
+    await fetch("/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        auto_pick_enabled: cfgState.auto_pick_enabled,
+        auto_ban_enabled: cfgState.auto_ban_enabled,
+        ban_protect_allies: cfgState.ban_protect_allies,
+        auto_pick_champs: cfgState.auto_pick_champs,
+        auto_ban_champs: cfgState.auto_ban_champs,
+      })
+    });
+  } catch (e) {}
+}
+
+// Badge no botao do painel mostrando o estado sem precisar abrir.
+function updateCfgBadge() {
+  const b = document.getElementById("cfg-badge");
+  if (!b) return;
+  let h = "";
+  if (cfgState.auto_pick_enabled) h += '<i class="cfgb pick">pick</i>';
+  if (cfgState.auto_ban_enabled) h += '<i class="cfgb ban">ban</i>';
+  b.innerHTML = h;
 }
 
 // ---- Loop principal de UI ----
@@ -1007,7 +1234,7 @@ async function tick() {
       if (cs.mode === "draft" && cs.is_my_turn) {
         loadChampControls(cs);
       } else if (ctr && ctr.innerHTML !== "") {
-        ctr.innerHTML = ""; csActionId = undefined; csSelected = null;
+        ctr.innerHTML = ""; csActionId = undefined; csActionType = null; csSelected = null;
       }
       document.getElementById("champ-teams").innerHTML = teamsHtml(cs);
       leave.style.display = "block";
@@ -1083,6 +1310,8 @@ function startLivePoll() {
 function stopLivePoll() {
   livePolling = false;
   if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+  if (buffTicker) { clearInterval(buffTicker); buffTicker = null; }
+  lastStatSig = "";
 }
 
 // Tick adaptativo: o backend ja recebe os eventos da LCU em tempo real (via
@@ -1093,5 +1322,19 @@ function scheduleTick() {
   const delay = FAST_TICK_PHASES.includes(currentPhase) ? 350 : 700;
   setTimeout(async () => { try { await tick(); } finally { scheduleTick(); } }, delay);
 }
+// Carrega o estado do auto-pick/ban uma vez para o badge do botao aparecer
+// logo de cara (sem precisar abrir o painel).
+(async () => {
+  try {
+    const cfg = await (await fetch("/config")).json();
+    cfgState.auto_pick_enabled = !!cfg.auto_pick_enabled;
+    cfgState.auto_ban_enabled = !!cfg.auto_ban_enabled;
+    cfgState.ban_protect_allies = !!cfg.ban_protect_allies;
+    cfgState.auto_pick_champs = (cfg.auto_pick_champs || []).slice();
+    cfgState.auto_ban_champs = (cfg.auto_ban_champs || []).slice();
+    updateCfgBadge();
+  } catch (e) {}
+})();
+
 tick();
 scheduleTick();

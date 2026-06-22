@@ -34,6 +34,8 @@ class LCUClient:
         self.headers: Dict[str, str] = {}
         self.champ_map: Dict[int, str] = {}
         self.spell_map: Dict[int, Dict[str, str]] = {}
+        self.item_map: Dict[int, Dict[str, Any]] = {}
+        self._spell_by_name: Dict[str, str] = {}
         self.summoner_name_cache: Dict[int, Dict[str, Any]] = {}
         # Status HTTP da ultima acao de pick/swap (pro feedback na UI).
         self.last_status: Optional[int] = None
@@ -192,6 +194,38 @@ class LCUClient:
                 if isinstance(s, dict) and "id" in s
             }
 
+    def spell_icon_by_name(self, name: Optional[str]) -> str:
+        """Icone de um feitico de invocador pelo displayName (vem da Live API)."""
+        if not name:
+            return ""
+        if not self._spell_by_name and self.spell_map:
+            self._spell_by_name = {
+                str(v.get("name", "")).lower(): v.get("icon", "")
+                for v in self.spell_map.values()
+            }
+        return self._spell_by_name.get(name.lower(), "")
+
+    def load_item_data(self) -> None:
+        """Carrega id->{name, icon, price} dos itens (uma vez). Dados locais da LCU."""
+        if self.item_map:
+            return
+        data = self._get("/lol-game-data/assets/v1/items.json")
+        if isinstance(data, list):
+            self.item_map = {
+                int(it["id"]): {
+                    "name": it.get("name", "?"),
+                    "icon": self.asset_url(it.get("iconPath")),
+                    "price": int(it.get("priceTotal", 0) or 0),
+                }
+                for it in data
+                if isinstance(it, dict) and "id" in it
+            }
+
+    def item_icon(self, item_id: Optional[int]) -> str:
+        if not item_id:
+            return ""
+        return (self.item_map.get(int(item_id)) or {}).get("icon", "")
+
     # ------------------------------------------------------------------
     # Gameflow / champ select
     # ------------------------------------------------------------------
@@ -330,6 +364,19 @@ class LCUClient:
     def get_current_rune_page(self) -> Optional[Dict[str, Any]]:
         return self._get("/lol-perks/v1/currentpage")
 
+    def get_recommended_rune_pages(self) -> list:
+        """Paginas de runa RECOMENDADAS para o campeao/posicao atuais.
+
+        So retorna algo durante o champ select (com um campeao definido); fora
+        disso vem vazio. Estrutura varia entre patches, por isso o /rune-recommend
+        normaliza os campos no server.
+        """
+        return self._get("/lol-perks/v1/recommended-pages") or []
+
+    def get_current_champion_id(self) -> Optional[int]:
+        """Id do campeao atualmente escolhido no champ select (ou None)."""
+        return self._get("/lol-champ-select/v1/current-champion")
+
     def apply_runes(self, primary_style: int, sub_style: int, perk_ids: list) -> bool:
         """Edita a pagina de runa atual (ou a primeira editavel) e ativa."""
         cur = self.get_current_rune_page()
@@ -369,11 +416,11 @@ class LCUClient:
     # ------------------------------------------------------------------
 
     def cancel_matchmaking(self) -> bool:
-        return self._delete("/lol-lobby/v1/lobby/matchmaking/search")
+        return self._delete("/lol-lobby/v2/lobby/matchmaking/search")
 
     def leave_lobby(self) -> bool:
         """Sai do lobby atual."""
-        return self._delete("/lol-lobby/v1/lobby")
+        return self._delete("/lol-lobby/v2/lobby")
 
     def get_lobby(self) -> Optional[Dict[str, Any]]:
         """Lobby atual (gameConfig.queueId, members, canStartActivity) ou None."""
