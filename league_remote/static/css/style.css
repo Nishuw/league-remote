@@ -25,6 +25,10 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* Garante que o atributo HTML `hidden` realmente esconda, mesmo quando a
+   classe define display (ex.: .actionbar { display:flex }). Sem isto, os
+   estilos do autor vencem a regra [hidden] do navegador. */
+[hidden] { display: none !important; }
 
 html { -webkit-text-size-adjust: 100%; }
 
@@ -190,6 +194,7 @@ body::before {
 .flash { animation: pulse 1s infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .5 } }
 .foot { margin-top: 14px; font-size: 11px; color: #4a5969; min-height: 14px; text-align: center; letter-spacing: .3px; }
+.ver { margin-top: 6px; font-size: 9px; color: #2f3a47; text-align: center; letter-spacing: .3px; }
 
 /* ---- Champ select (draft) ---- */
 .champ { display: none; margin-top: 4px; }
@@ -256,7 +261,18 @@ body::before {
 .row .posb { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted-2); background: var(--surface-3); border: 1px solid var(--border); padding: 1px 6px; border-radius: 6px; flex: 0 0 auto; }
 .row .sname { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* ---- ARAM (banco, reroll, trocas) ---- */
+/* ---- ARAM (banco de reserva e trocas) ---- */
+#champ-teams { margin-top: 14px; }
+.aram-head {
+  font-family: "Cinzel", serif; font-size: 13px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--gold-bright); font-weight: 700; text-align: center; margin: 2px 0 12px;
+}
+.aram-lbl { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+.aram-wait {
+  text-align: center; color: var(--muted); font-size: 14px; padding: 22px 10px; margin-bottom: 8px;
+  border: 1px dashed var(--border); border-radius: 14px;
+}
+.aram-empty { text-align: center; color: var(--muted); font-size: 12px; padding: 8px; }
 .aram-current {
   display: flex; align-items: center; gap: 14px; margin: 2px 0 10px; text-align: left;
   padding: 12px; border-radius: 14px;
@@ -266,14 +282,7 @@ body::before {
 .aram-champ { width: 76px; height: 76px; border-radius: 14px; flex: 0 0 76px; background: var(--border); object-fit: cover; border: 2px solid var(--gold); box-shadow: 0 0 20px rgba(200, 170, 110, .3); }
 .aram-champ.noimg { box-shadow: none; border-color: var(--border); }
 .aram-meta { min-width: 0; flex: 1; }
-.aram-name { font-family: "Cinzel", serif; font-size: 21px; font-weight: 700; color: var(--gold-bright); margin-bottom: 10px; }
-.rerollbtn {
-  padding: 11px 18px; border: 1px solid rgba(255, 255, 255, .14); border-radius: 10px; cursor: pointer; font-weight: 700; font-size: 14px;
-  background: linear-gradient(180deg, var(--gold-bright), var(--gold) 55%, var(--gold-deep)); color: #20180a;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .4);
-}
-.rerollbtn:disabled { background: #233040; color: var(--muted); cursor: not-allowed; box-shadow: none; border-color: transparent; }
-.rerollbtn:active:not(:disabled) { transform: scale(.97); }
+.aram-name { font-family: "Cinzel", serif; font-size: 21px; font-weight: 700; color: var(--gold-bright); }
 .aram-sec {
   font-family: "Cinzel", serif;
   font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--gold); margin: 18px 0 8px; text-align: left; font-weight: 700;
@@ -286,6 +295,11 @@ body::before {
 .benchitem:active { transform: scale(.95); border-color: var(--gold); }
 .benchitem img { width: 50px; height: 50px; border-radius: 10px; background: var(--border); }
 .benchitem span { font-size: 9px; color: var(--muted-2); max-width: 62px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Cartas a escolher (Desordem): maiores e destacadas */
+.bench-grid.cards { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px; }
+.bench-grid.cards .benchitem { padding: 12px; border-color: var(--gold); box-shadow: 0 0 16px rgba(200, 170, 110, .25); }
+.bench-grid.cards .benchitem img { width: 72px; height: 72px; }
+.bench-grid.cards .benchitem span { font-size: 12px; color: var(--gold-bright); max-width: 92px; }
 .traderow { display: flex; align-items: center; gap: 10px; padding: 9px; border-radius: 10px; background: var(--surface-2); margin-bottom: 6px; text-align: left; border: 1px solid var(--border); }
 .traderow img { width: 36px; height: 36px; border-radius: 8px; flex: 0 0 36px; background: var(--border); }
 .tradewho { flex: 1; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

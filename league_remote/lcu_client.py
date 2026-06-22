@@ -190,12 +190,8 @@ class LCUClient:
         )
 
     # ------------------------------------------------------------------
-    # ARAM: banco de reserva, reroll e trocas
+    # ARAM: banco de reserva e trocas
     # ------------------------------------------------------------------
-
-    def reroll(self) -> bool:
-        """Re-rola (reroll) o campeao sorteado no ARAM."""
-        return self._post("/lol-champ-select/v1/session/my-selection/reroll")
 
     def bench_swap(self, champion_id: int) -> bool:
         """Troca o campeao atual por um do banco de reserva (ARAM)."""
@@ -272,6 +268,26 @@ class LCUClient:
 
     def cancel_matchmaking(self) -> bool:
         return self._delete("/lol-lobby/v1/lobby/matchmaking/search")
+
+    def leave_lobby(self) -> bool:
+        """Sai do lobby atual."""
+        return self._delete("/lol-lobby/v1/lobby")
+
+    def dodge_champ_select(self) -> bool:
+        """Da dodge (sai) do champ select em andamento.
+
+        Tenta o RPC de quit do team builder e, se nao rolar, sai do lobby
+        (o que tambem tira o jogador do champ select). Retorna True se algum
+        dos caminhos funcionar.
+        """
+        payload = {
+            "destination": "lcdsServiceProxy",
+            "method": "call",
+            "args": '["", "teambuilder-draft", "quitV2", ""]',
+        }
+        if self._post_json("/lol-login/v1/session/invoke", payload) is not None:
+            return True
+        return self.leave_lobby()
 
     def get_search_state(self) -> Optional[Dict[str, Any]]:
         """Inclui timeInQueue e estimatedQueueTime."""

@@ -176,7 +176,7 @@ class Monitor:
         return result
 
     def _build_bench(self, session: Dict[str, Any], local_cell: Any) -> Dict[str, Any]:
-        """Dados do ARAM: campeao atual, banco de reserva, rerolls e trocas."""
+        """Dados do ARAM: campeao atual, banco de reserva e trocas."""
         client = self.client
 
         # Mapas por celula para resolver campeao/invocador nas trocas
@@ -221,7 +221,6 @@ class Monitor:
             "my_champion_id": my_champion_id or None,
             "my_champion": client.champ_name(my_champion_id),
             "bench": bench,
-            "rerolls": int(session.get("rerollsRemaining", 0) or 0),
             "trades": trades,
         }
 
@@ -309,31 +308,44 @@ class Monitor:
 
     def run(self) -> None:
         while True:
-            if not self.client.base_url:
-                connected = self.client.connect()
-                with self.lock:
-                    self.state["connected"] = connected
-                if not connected:
-                    time.sleep(3)
-                    continue
-
-            phase = self.client.get_gameflow_phase()
-            with self.lock:
-                self.state["connected"] = self.client.base_url is not None
-                self.state["phase"] = phase
-
-            self._update_queue()
-
-            if phase == "Matchmaking":
-                self._handle_matchmaking()
-            elif phase == "ReadyCheck":
-                self._handle_ready_check()
-            elif phase == "ChampSelect":
-                self._handle_champ_select()
-            else:
-                self._handle_idle()
-
+            phase = None
+            try:
+                phase = self._tick()
+            except Exception as exc:  # noqa: BLE001 - o loop nunca pode morrer
+                # Um erro num ciclo (dado inesperado, rede, etc.) nao pode
+                # derrubar a thread: isso congelaria o estado (ex.: champ
+                # select nunca atualizaria). Loga e segue para o proximo ciclo.
+                print(f"[monitor] erro no ciclo: {exc!r}")
+                time.sleep(1)
+                continue
             time.sleep(FAST_POLL_INTERVAL if phase in FAST_POLL_PHASES else SLOW_POLL_INTERVAL)
+
+    def _tick(self) -> Optional[str]:
+        """Executa um ciclo do monitor e retorna a fase atual."""
+        if not self.client.base_url:
+            connected = self.client.connect()
+            with self.lock:
+                self.state["connected"] = connected
+            if not connected:
+                time.sleep(3)
+                return None
+
+        phase = self.client.get_gameflow_phase()
+        with self.lock:
+            self.state["connected"] = self.client.base_url is not None
+            self.state["phase"] = phase
+
+        self._update_queue()
+
+        if phase == "Matchmaking":
+            self._handle_matchmaking()
+        elif phase == "ReadyCheck":
+            self._handle_ready_check()
+        elif phase == "ChampSelect":
+            self._handle_champ_select()
+        else:
+            self._handle_idle()
+        return phase
 
     def _handle_matchmaking(self) -> None:
         search = self.client.get_search_state() or {}

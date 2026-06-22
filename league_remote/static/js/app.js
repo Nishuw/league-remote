@@ -30,9 +30,23 @@ async function decline() {
   try { await fetch("/decline", { method: "POST" }); } catch (e) {}
 }
 
+let currentPhase = null;
 async function leaveQueue() {
-  if (!confirm("Sair da fila?")) return;
-  try { await fetch("/leave-queue", { method: "POST" }); } catch (e) {}
+  const dodge = currentPhase === "ChampSelect";
+  const msg = dodge
+    ? "Sair do campeao select agora? Isso conta como dodge e pode dar punicao."
+    : "Sair da fila?";
+  if (!confirm(msg)) return;
+  const btn = document.getElementById("leavebtn");
+  const original = btn.textContent;
+  btn.textContent = "saindo...";
+  try {
+    const j = await (await fetch("/leave", { method: "POST" })).json();
+    if (!j.ok) btn.textContent = "falhou - tentar de novo";
+    else setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (e) {
+    btn.textContent = "erro - tentar de novo";
+  }
 }
 
 // ---- Alarme (vibrar + som) ----
@@ -128,10 +142,7 @@ function teamsHtml(cs) {
   '</div>';
 }
 
-// ---- ARAM: campeao sorteado, reroll, banco de reserva e trocas ----
-async function reroll() {
-  try { await fetch("/aram/reroll", { method: "POST" }); } catch (e) {}
-}
+// ---- ARAM: banco de reserva e trocas ----
 async function benchSwap(id) {
   try {
     await fetch("/aram/swap", {
@@ -160,48 +171,57 @@ function tradeButtons(t) {
 }
 
 function renderAram(cs) {
-  const myIcon = cs.my_champion_id
-    ? '<img class="aram-champ" src="' + champIcon(cs.my_champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
-    : '<div class="aram-champ noimg"></div>';
-  const canReroll = cs.rerolls > 0 ? "" : "disabled";
-  let h =
-    '<div class="aram-current">' + myIcon +
+  // ARAM (e ARAM: Desordem) sao todos aleatorios: nao existe grade de pick.
+  // Voce recebe um campeao sorteado e troca pelo BANCO (as "cartas" que
+  // aparecem) ou trocando com aliados.
+  let h = '<div class="aram-head">campeoes</div>';
+
+  const hasChamp = !!cs.my_champion_id;
+  const hasBench = cs.bench && cs.bench.length;
+
+  // Campeao atual (depois de escolher / sortear)
+  if (hasChamp) {
+    h += '<div class="aram-current">' +
+      '<img class="aram-champ" src="' + champIcon(cs.my_champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
       '<div class="aram-meta">' +
-        '<div class="aram-name">' + (cs.my_champion || "sorteando...") + '</div>' +
-        '<button class="rerollbtn" ' + canReroll + ' onclick="reroll()">&#8635; Reroll (' + cs.rerolls + ')</button>' +
-      '</div>' +
-    '</div>';
-
-  h += '<div class="aram-sec">Escolha seu campeao</div>';
-  if (cs.bench && cs.bench.length) {
-    h += '<div class="bench-grid">' + cs.bench.map(b =>
-      '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
-        '<img src="' + champIcon(b.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
-        '<span>' + (b.champion || "?") + '</span>' +
-      '</div>'
-    ).join("") + '</div>';
-  } else {
-    h += '<div class="muted" style="font-size:12px">nenhum campeao disponivel no momento</div>';
+        '<div class="aram-lbl">seu campeao</div>' +
+        '<div class="aram-name">' + (cs.my_champion || "") + '</div>' +
+      '</div></div>';
   }
 
+  // Banco / roleta: na chegada sao os campeoes para escolher e jogar; depois,
+  // os nao escolhidos que ficam disponiveis para troca. Tocar pega o campeao.
+  if (hasBench) {
+    const title = hasChamp ? "Roleta (toque para trocar)" : "Roleta (toque para pegar)";
+    h += '<div class="aram-sec">' + title + '</div><div class="bench-grid cards">' +
+      cs.bench.map(b =>
+        '<div class="benchitem" onclick="benchSwap(' + b.champion_id + ')">' +
+          '<img src="' + champIcon(b.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
+          '<span>' + (b.champion || "?") + '</span>' +
+        '</div>'
+      ).join("") + '</div>';
+  } else if (!hasChamp) {
+    h += '<div class="aram-wait">aguardando os campeoes...</div>';
+  }
+
+  // Trocas com aliados (quando o modo permite)
   if (cs.trades && cs.trades.length) {
-    h += '<div class="aram-sec">Trocas com aliados</div>';
-    h += cs.trades.map(t =>
-      '<div class="traderow">' +
-        '<img src="' + champIcon(t.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
-        '<span class="tradewho">' + (t.champion || "?") + (t.name ? ' (' + t.name + ')' : '') + '</span>' +
-        tradeButtons(t) +
-      '</div>'
-    ).join("");
+    h += '<div class="aram-sec">Trocas com aliados</div>' +
+      cs.trades.map(t =>
+        '<div class="traderow">' +
+          '<img src="' + champIcon(t.champion_id) + '" onerror="this.style.visibility=\'hidden\'">' +
+          '<span class="tradewho">' + (t.champion || "?") + (t.name ? ' (' + t.name + ')' : '') + '</span>' +
+          tradeButtons(t) +
+        '</div>'
+      ).join("");
   }
 
-  h += '<div class="aram-sec">Composicao</div>' + teamsHtml(cs);
   return h;
 }
 
 function renderChamp(cs) {
   if (cs.mode === "bench") return renderAram(cs);
-  return turnBanner(cs) + bansBar(cs) + teamsHtml(cs);
+  return turnBanner(cs) + bansBar(cs);
 }
 
 let csActionId = undefined;
@@ -212,7 +232,8 @@ function ensureChampLayout() {
   if (!document.getElementById("champ-info")) {
     champ.innerHTML =
       '<div id="champ-info"></div>' +
-      '<div id="champ-controls"></div>';
+      '<div id="champ-controls"></div>' +
+      '<div id="champ-teams"></div>';
   }
 }
 
@@ -241,11 +262,6 @@ function resetChampLayout() {
 async function loadChampControls(cs) {
   const ctr = document.getElementById("champ-controls");
   if (!ctr) return;
-  if (cs.mode === "bench") {
-    // ARAM nao tem grade de pick/ban; tudo fica em renderAram.
-    if (ctr.innerHTML !== "") { ctr.innerHTML = ""; csActionId = undefined; csSelected = null; }
-    return;
-  }
   if (!cs.is_my_turn) {
     if (csActionId !== undefined) { ctr.innerHTML = ""; csActionId = undefined; csSelected = null; }
     return;
@@ -525,15 +541,33 @@ async function applyRunes() {
 }
 
 // ---- Painel ao vivo ----
-let lastLiveLoad = 0;
+let lastFeedSig = "";
+function ensureLiveLayout() {
+  const live = document.getElementById("live");
+  if (!document.getElementById("live-stats")) {
+    live.innerHTML = '<div id="live-stats"></div><div id="live-feed"></div>';
+    lastFeedSig = "";
+  }
+}
+// A Live Client Data API do jogo atualiza ~1x/s; 1000ms mantem os numeros
+// frescos sem martelar o endpoint local.
+const LIVE_POLL_MS = 1000;
+let liveLoading = false;
 async function loadLive() {
-  const now = Date.now();
-  if (now - lastLiveLoad < 2000) return;
-  lastLiveLoad = now;
+  // Trava por requisicao em andamento (em vez de janela de tempo): o poller
+  // dispara a cada 1s e cada chamada sempre busca, a menos que a anterior
+  // ainda nao tenha respondido. Evita o CS/KDA "travarem" por corrida de tempo.
+  if (liveLoading) return;
+  liveLoading = true;
   try {
     const d = await (await fetch("/live")).json();
     const live = document.getElementById("live");
-    if (!d.in_game) { live.innerHTML = '<div class="loading">carregando dados da partida...</div>'; return; }
+    if (!d.in_game) {
+      live.innerHTML = '<div class="loading">carregando dados da partida...</div>';
+      lastFeedSig = "";
+      return;
+    }
+    ensureLiveLayout();
     const mins = Math.floor(d.game_time / 60), secs = d.game_time % 60;
     const teams = { ORDER: [], CHAOS: [] };
     d.players.forEach(p => { (teams[p.team] || (teams[p.team] = [])).push(p); });
@@ -576,20 +610,33 @@ async function loadLive() {
     h += '</div>';
     h += teamBlock(teams.ORDER || [], "ally", "Time Azul", "ORDER");
     h += teamBlock(teams.CHAOS || [], "enemy", "Time Vermelho", "CHAOS");
-    if (Array.isArray(d.feed) && d.feed.length) {
-      h += '<div class="lfeed"><div class="lfeed-t">Eventos</div>' +
-        d.feed.slice().reverse().map(e => {
-          const m = Math.floor((e.t || 0) / 60), s = Math.floor((e.t || 0) % 60);
-          const cls = "lfeed-row" + (e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : ""));
-          const ic = e.cid ? '<img class="lfeed-ic" src="' + champIcon(e.cid) + '" onerror="this.style.display=\'none\'">' : "";
-          return '<div class="' + cls + '">' +
-            '<span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' +
-            ic + '<span class="lfeed-txt">' + e.txt + '</span></div>';
-        }).join("") + '</div>';
+    document.getElementById("live-stats").innerHTML = h;
+
+    // Feed: so redesenha quando ha evento novo, para nao ficar piscando.
+    const feed = Array.isArray(d.feed) ? d.feed : [];
+    const sig = feed.map(e => (e.t || 0) + e.txt).join("|");
+    if (sig !== lastFeedSig) {
+      lastFeedSig = sig;
+      const fe = document.getElementById("live-feed");
+      if (!feed.length) {
+        fe.innerHTML = "";
+      } else {
+        fe.innerHTML = '<div class="lfeed"><div class="lfeed-t">Eventos</div>' +
+          feed.slice().reverse().map(e => {
+            const m = Math.floor((e.t || 0) / 60), s = Math.floor((e.t || 0) % 60);
+            const cls = "lfeed-row" + (e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : ""));
+            const ic = e.cid ? '<img class="lfeed-ic" src="' + champIcon(e.cid) + '" onerror="this.style.display=\'none\'">' : "";
+            return '<div class="' + cls + '">' +
+              '<span class="lfeed-time">' + m + ':' + String(s).padStart(2, "0") + '</span>' +
+              ic + '<span class="lfeed-txt">' + e.txt + '</span></div>';
+          }).join("") + '</div>';
+      }
     }
-    live.innerHTML = h;
   } catch (e) {
     document.getElementById("live").innerHTML = '<div class="loading">sem dados ao vivo (ative a API no jogo)</div>';
+    lastFeedSig = "";
+  } finally {
+    liveLoading = false;
   }
 }
 
@@ -705,6 +752,7 @@ async function tick() {
   try {
     const r = await fetch("/status");
     const s = await r.json();
+    currentPhase = s.phase;
 
     document.getElementById("conn").textContent = s.connected ? "cliente conectado" : "cliente do LoL fechado";
     document.getElementById("conn-dot").className = "dot " + (s.connected ? "on" : "off");
@@ -746,9 +794,13 @@ async function tick() {
       content.style.display = "none";
       champ.style.display = "none";
       live.style.display = "none";
+      leave.style.display = "none";
     };
 
-    if (s.ready_check && s.player_response === "None") {
+    // Mantem o poller ao vivo so durante a partida; startLivePoll e idempotente.
+    if (s.phase !== "InProgress") stopLivePoll();
+
+    if (s.phase === "ReadyCheck" && s.ready_check && s.player_response === "None") {
       hideAll();
       resetChampLayout();
       card.classList.remove("wide");
@@ -762,15 +814,27 @@ async function tick() {
       card.classList.add("wide");
       champ.style.display = "block";
       ensureChampLayout();
-      document.getElementById("champ-info").innerHTML = renderChamp(s.champ_select);
-      loadChampControls(s.champ_select);
+      const cs = s.champ_select;
+      document.getElementById("champ-info").innerHTML = renderChamp(cs);
+      // Grade com todos os campeoes so no draft normal (pick/ban por vez).
+      // No ARAM/Desordem a escolha e as trocas acontecem pelas cartas do banco
+      // (renderAram), entao nunca mostramos a grade completa.
+      const ctr = document.getElementById("champ-controls");
+      if (cs.mode === "draft" && cs.is_my_turn) {
+        loadChampControls(cs);
+      } else if (ctr && ctr.innerHTML !== "") {
+        ctr.innerHTML = ""; csActionId = undefined; csSelected = null;
+      }
+      document.getElementById("champ-teams").innerHTML = teamsHtml(cs);
+      leave.style.display = "block";
+      leave.textContent = "Sair (dodge)";
       phaseEl.classList.remove("flash");
     } else if (s.phase === "InProgress") {
       stopAlarm();
       hideAll();
       card.classList.add("wide");
       live.style.display = "block";
-      loadLive();
+      startLivePoll();
       phaseEl.classList.remove("flash");
     } else if (s.player_response === "Accepted") {
       stopAlarm();
@@ -796,6 +860,7 @@ async function tick() {
         queue.textContent = fmt(s.time_in_queue);
         label.textContent = "tempo de fila";
         leave.style.display = "block";
+        leave.textContent = "Sair da fila";
         idleExtra.innerHTML = "";
       } else {
         queue.style.display = "none";
@@ -809,6 +874,18 @@ async function tick() {
     document.getElementById("conn").textContent = "servidor offline";
     document.getElementById("conn-dot").className = "dot off";
   }
+}
+
+// Poller dedicado do painel ao vivo: roda em ~1s (independente do tick de UI
+// de 700ms) enquanto a partida esta em andamento, mantendo os numeros frescos.
+let liveTimer = null;
+function startLivePoll() {
+  if (liveTimer) return;
+  loadLive(); // busca imediata ao entrar na partida
+  liveTimer = setInterval(loadLive, LIVE_POLL_MS);
+}
+function stopLivePoll() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
 }
 
 setInterval(tick, 700);

@@ -13,7 +13,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v=v) }}">
 </head>
 <body>
   <header class="topbar">
@@ -27,11 +27,11 @@
       <div id="content">
         <div class="queue" id="queue">--</div>
         <div class="muted" id="queue-label">tempo de fila</div>
-        <button class="leavebtn" id="leavebtn" onclick="leaveQueue()">Sair da fila</button>
         <div id="idle-extra"></div>
       </div>
       <div class="champ" id="champ"></div>
       <div class="live" id="live"></div>
+      <button class="leavebtn" id="leavebtn" onclick="leaveQueue()" style="display:none">Sair da fila</button>
     </div>
 
     <button class="cfgbtn" id="cfgbtn" onclick="toggleConfig()">&#9881; Auto-pick / Auto-ban</button>
@@ -41,6 +41,7 @@
     <div class="cfg-panel" id="runes-panel" hidden></div>
 
     <div class="foot" id="foot"></div>
+    <div class="ver" id="ver">build {{ v }}</div>
   </main>
 
   <div class="actionbar" id="actionbar" hidden>
@@ -48,6 +49,6 @@
     <button class="accept" id="accept" onclick="accept()">ACEITAR</button>
   </div>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v=v) }}"></script>
 </body>
 </html>

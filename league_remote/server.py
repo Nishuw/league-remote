@@ -4,9 +4,16 @@ Usa o padrao app factory (`create_app`) recebendo o `Monitor` por injecao,
 evitando estado global e facilitando testes.
 """
 
+import time
+
 from flask import Flask, jsonify, render_template, request
 
+from . import __version__
 from .monitor import Monitor
+
+# Muda a cada inicializacao do servidor; usado para invalidar o cache do
+# navegador nos arquivos estaticos (CSS/JS).
+_ASSET_VERSION = f"{__version__}-{int(time.time())}"
 
 
 def _perk_icon(icon_path: str) -> str:
@@ -22,13 +29,23 @@ def create_app(monitor: Monitor) -> Flask:
     app = Flask(__name__)
     client = monitor.client
 
+    # Nao deixa o navegador cachear arquivos estaticos (CSS/JS): assim, ao
+    # reiniciar o servidor, o celular sempre pega a versao nova.
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+    @app.after_request
+    def _no_cache(resp):
+        if request.path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+        return resp
+
     # ------------------------------------------------------------------
     # Pagina
     # ------------------------------------------------------------------
 
     @app.route("/")
     def index():
-        return render_template("index.html")
+        return render_template("index.html", v=_ASSET_VERSION)
 
     # ------------------------------------------------------------------
     # Estado / fila
@@ -56,6 +73,19 @@ def create_app(monitor: Monitor) -> Flask:
         monitor.set_last_action("Saiu da fila pelo celular" if ok else "Falha ao sair da fila")
         return jsonify({"ok": ok})
 
+    @app.route("/leave", methods=["POST"])
+    def leave():
+        """Sair de forma ciente da fase: cancela a fila ou da dodge no champ select."""
+        phase = monitor.snapshot().get("phase") or client.get_gameflow_phase()
+        if phase == "ChampSelect":
+            ok = client.dodge_champ_select()
+            msg = "Dodge do champ select pelo celular" if ok else "Falha ao sair do champ select"
+        else:
+            ok = client.cancel_matchmaking()
+            msg = "Saiu da fila pelo celular" if ok else "Falha ao sair da fila"
+        monitor.set_last_action(msg)
+        return jsonify({"ok": ok})
+
     # ------------------------------------------------------------------
     # Champ select
     # ------------------------------------------------------------------
@@ -64,13 +94,18 @@ def create_app(monitor: Monitor) -> Flask:
     def champ_options():
         """Lista de campeoes disponiveis para a acao atual (pick ou ban)."""
         client.load_champion_data()
+        session = client.get_champ_select_session() or {}
+        is_bench = bool(session.get("benchEnabled"))
         action = client.local_action()
         atype = action.get("type")
         all_ids = [cid for cid in client.champ_map.keys() if cid and cid > 0]
         if atype == "ban":
             ids = client.get_bannable_champion_ids() or all_ids
         elif atype == "pick":
-            ids = client.get_pickable_champion_ids() or all_ids
+            pickable = client.get_pickable_champion_ids()
+            # No ARAM (modo banco) so pode escolher o subconjunto oferecido;
+            # nao cai no fallback de "todos os campeoes". No draft normal sim.
+            ids = pickable if (is_bench or pickable) else all_ids
         else:
             ids = []
         champs = sorted(
@@ -98,25 +133,36 @@ def create_app(monitor: Monitor) -> Flask:
 
     @app.route("/debug/champ-select")
     def debug_champ_select():
-        """Dump cru da sessao de champ select (para diagnosticar ARAM/Desordem)."""
+        """Dump cru de varios endpoints do champ select.
+
+        Serve para diagnosticar ARAM/Desordem: abra esta rota no momento exato
+        em que os campeoes aparecem para escolher, para descobrir em qual campo
+        a LCU expoe as opcoes.
+        """
         session = client.get_champ_select_session()
-        gameflow = client.get_gameflow_session()
         bench = session.get("benchChampions") if isinstance(session, dict) else None
+        # Tenta varios endpoints relacionados; os que nao existirem viram null.
+        extra = {
+            ep: client._get(ep)
+            for ep in (
+                "/lol-champ-select/v1/pickable-champion-ids",
+                "/lol-champ-select/v1/bannable-champion-ids",
+                "/lol-champ-select/v1/session/my-selection",
+                "/lol-champ-select/v1/all-grid-champions",
+                "/lol-champ-select/v1/disabled-champion-ids",
+                "/lol-champ-select-legacy/v1/session",
+            )
+        }
         return jsonify({
             "connected": client.base_url is not None,
             "champ_select_keys": sorted(session.keys()) if isinstance(session, dict) else None,
             "benchEnabled": session.get("benchEnabled") if isinstance(session, dict) else None,
             "benchChampions": bench,
-            "rerollsRemaining": session.get("rerollsRemaining") if isinstance(session, dict) else None,
+            "local_action": client.local_action(),
             "champ_select": session,
-            "gameflow": gameflow,
+            "endpoints": extra,
+            "gameflow": client.get_gameflow_session(),
         })
-
-    @app.route("/aram/reroll", methods=["POST"])
-    def aram_reroll():
-        ok = client.reroll()
-        monitor.set_last_action("Reroll pelo celular" if ok else "Falha no reroll")
-        return jsonify({"ok": ok})
 
     @app.route("/aram/swap", methods=["POST"])
     def aram_swap():
@@ -124,9 +170,17 @@ def create_app(monitor: Monitor) -> Flask:
         champion_id = data.get("championId")
         if champion_id is None:
             return jsonify({"ok": False, "error": "championId ausente"})
-        ok = client.bench_swap(int(champion_id))
+        cid = int(champion_id)
+        # No ARAM/Desordem a escolha e sempre pelo banco (bench swap). Se ainda
+        # houver uma acao de pick em progresso (instante inicial sem campeao),
+        # cai pra completar a acao com o campeao escolhido.
+        ok = client.bench_swap(cid)
+        if not ok:
+            action = client.local_action()
+            if action.get("id") is not None and action.get("type") == "pick":
+                ok = client.patch_action(action["id"], cid, True)
         monitor.set_last_action(
-            f"Trocou pelo banco: {client.champ_name(int(champion_id)) or champion_id}"
+            f"Pegou do banco: {client.champ_name(cid) or cid}"
             if ok else "Falha ao trocar pelo banco"
         )
         return jsonify({"ok": ok})
