@@ -18,7 +18,8 @@ from .config import COMMON_LOCKFILE_PATHS
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Endpoint local sem autenticacao exposto pelo jogo durante a partida.
-LIVE_CLIENT_URL = "https://127.0.0.1:2999/liveclientdata/allgamedata"
+LIVE_CLIENT_BASE = "https://127.0.0.1:2999/liveclientdata"
+LIVE_CLIENT_URL = LIVE_CLIENT_BASE + "/allgamedata"
 
 # Timeout curto: a LCU e local, entao respostas sao rapidas ou nao chegam.
 REQUEST_TIMEOUT = 2
@@ -333,17 +334,34 @@ class LCUClient:
         print(f"[aram] bench_swap champ={champion_id} -> status={status} ok={ok}{detail}")
         return ok
 
+    def _trade(self, trade_id: int, action: str) -> bool:
+        """request/accept/decline de uma troca; guarda status p/ feedback na UI."""
+        endpoint = f"/lol-champ-select/v1/session/trades/{int(trade_id)}/{action}"
+        # Alguns endpoints da LCU rejeitam POST sem corpo; mandamos {} por garantia.
+        r = self._request("POST", endpoint, json={})
+        status = getattr(r, "status_code", None)
+        ok = r is not None and status in (200, 204)
+        self.last_status = status
+        detail = ""
+        if r is not None and not ok:
+            try:
+                detail = f" body={r.text[:200]!r}"
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"[trade] {action} id={trade_id} -> status={status} ok={ok}{detail}")
+        return ok
+
     def trade_request(self, trade_id: int) -> bool:
         """Oferece troca de campeao a um aliado."""
-        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/request")
+        return self._trade(trade_id, "request")
 
     def trade_accept(self, trade_id: int) -> bool:
         """Aceita uma troca de campeao recebida."""
-        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/accept")
+        return self._trade(trade_id, "accept")
 
     def trade_decline(self, trade_id: int) -> bool:
         """Recusa uma troca de campeao recebida."""
-        return self._post(f"/lol-champ-select/v1/session/trades/{int(trade_id)}/decline")
+        return self._trade(trade_id, "decline")
 
     # ------------------------------------------------------------------
     # Runas
@@ -495,10 +513,52 @@ class LCUClient:
     # ------------------------------------------------------------------
 
     def get_live_game(self) -> Optional[Dict[str, Any]]:
+        return self._get_live("allgamedata")
+
+    def _get_live(self, path: str) -> Optional[Any]:
+        """GET numa sub-rota da Live Client Data API (porta 2999, sem auth)."""
         try:
-            r = requests.get(LIVE_CLIENT_URL, verify=False, timeout=REQUEST_TIMEOUT)
+            r = requests.get(f"{LIVE_CLIENT_BASE}/{path}", verify=False, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
                 return r.json()
             return None
         except requests.exceptions.RequestException:
             return None
+
+    # Sub-rotas segmentadas: payloads menores que o allgamedata e independentes
+    # entre si (se uma falhar num ciclo, as outras ainda respondem).
+    def get_live_gamestats(self) -> Optional[Dict[str, Any]]:
+        """Tempo de jogo, modo e mapa (bloco minusculo)."""
+        return self._get_live("gamestats")
+
+    def get_live_playerlist(self) -> Optional[list]:
+        """Lista de jogadores (scores, itens, feiticos, nivel)."""
+        return self._get_live("playerlist")
+
+    def get_live_eventdata(self) -> Optional[Dict[str, Any]]:
+        """So o feed de eventos (abates, objetivos) -- {'Events': [...]}."""
+        return self._get_live("eventdata")
+
+    def get_live_active_player(self) -> Optional[Dict[str, Any]]:
+        """Jogador local completo (ouro, nivel, runas) -- bloco mais pesado."""
+        return self._get_live("activeplayer")
+
+    def get_live_active_name(self) -> Optional[str]:
+        """Apenas o nome do jogador local ('Nome#TAG') -- leve, p/ marcar 'Voce'."""
+        return self._get_live("activeplayername")
+
+    # ------------------------------------------------------------------
+    # Perfil / honra (home e pos-jogo)
+    # ------------------------------------------------------------------
+
+    def get_honor_profile(self) -> Optional[Dict[str, Any]]:
+        """Nivel de honra do jogador (honorLevel, checkpoint)."""
+        return self._get("/lol-honor-v2/v1/profile")
+
+    def get_honor_ballot(self) -> Optional[Dict[str, Any]]:
+        """Cedula de honra do fim de jogo (so existe logo apos a partida)."""
+        return self._get("/lol-honor-v2/v1/ballot")
+
+    def honor_player(self, payload: Dict[str, Any]) -> bool:
+        """Honra um jogador elegivel do pos-jogo."""
+        return self._post_json("/lol-honor-v2/v1/honor-player", payload) is not None

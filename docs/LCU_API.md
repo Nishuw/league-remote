@@ -105,7 +105,7 @@ Hoje montamos/salvamos página manualmente. A LCU recomenda runas prontas.
 | ✅ | `GET` | `/lol-summoner/v1/current-summoner` | Nome, nível, ícone, level. |
 | ✅ | `GET` | `/lol-ranked/v1/current-ranked-stats` | Elo solo/flex. |
 | ➕ | `GET` | `/lol-summoner/v1/current-summoner/summoner-profile` | Ícone de fundo, bandeira, troféus do perfil. |
-| ➕ | `GET` | `/lol-honor-v2/v1/profile` | Nível de honra. |
+| ✅ | `GET` | `/lol-honor-v2/v1/profile` | Nível de honra (mostrado no card de perfil da home, via `/profile`). |
 | ➕ | `GET` | `/lol-challenges/v1/summary-player-data/local-player` | Pontos de desafios, título, top challenges. |
 | ➕ | `PUT` | `/lol-chat/v1/me` | Definir **status/availability** (`chat`, `away`, `dnd`) e mensagem de status pelo celular. |
 
@@ -117,8 +117,8 @@ Hoje montamos/salvamos página manualmente. A LCU recomenda runas prontas.
 |---|---|---|---|
 | ✅ | `GET` | `/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=N` | Histórico recente. |
 | ➕ | `GET` | `/lol-end-of-game/v1/eog-stats-block` | Placar de fim de jogo (KDA, dano, ouro) na tela de pós-partida — só existe logo após a partida. |
-| ➕ | `GET` | `/lol-honor-v2/v1/ballot` | Cédula de honra do fim de jogo. |
-| ➕ | `POST` | `/lol-honor-v2/v1/honor-player` | Honrar um aliado pelo celular. |
+| ✅ | `GET` | `/lol-honor-v2/v1/ballot` | Cédula de honra do fim de jogo (aliados elegíveis). Normalizado em `/honor`; só existe nas fases de pós-jogo. |
+| ✅ | `POST` | `/lol-honor-v2/v1/honor-player` | Honrar um aliado pelo celular (1 toque). Body defensivo: `summonerId` + `puuid` + `honorCategory`. |
 
 ---
 
@@ -129,10 +129,12 @@ mais leves para polling:
 
 | | Endpoint | Para quê |
 |---|---|---|
-| ✅ | `GET https://127.0.0.1:2999/liveclientdata/allgamedata` | Tudo de uma vez. |
-| ➕ | `.../activeplayer` | Só o jogador local (ouro, runas, stats) — mais leve. |
-| ➕ | `.../playerlist` | Lista de jogadores (KDA, itens, nível). |
-| ➕ | `.../eventdata` | Só o feed de eventos (abates, objetivos) — ideal pro feed sem baixar o resto. |
+| ✅ | `GET https://127.0.0.1:2999/liveclientdata/allgamedata` | Tudo de uma vez. Hoje é só **fallback** (`/live`); o painel usa as sub-rotas abaixo. |
+| ✅ | `.../gamestats` | Tempo/modo/mapa (bloco mínimo). Base das duas rotas segmentadas. |
+| ✅ | `.../playerlist` | Lista de jogadores (KDA, itens, nível). Usado em `/live/stats` (e em `/live/feed` só pra mapear autor→time). |
+| ✅ | `.../eventdata` | Só o feed de eventos (abates, objetivos). Base do `/live/feed` (leve+rápido). |
+| ✅ | `.../activeplayer` | Jogador local (ouro/nível). Usado em `/live/stats`. |
+| ✅ | `.../activeplayername` | Só o nome do jogador local — leve, marca "Você" no `/live/feed`. |
 | ➕ | `.../playerscores?riotId=<nome>` | Placar de um jogador específico. |
 
 **O que extraímos do `allgamedata` (`/live`):**
@@ -171,5 +173,9 @@ mais leves para polling:
    normalizado em `/rune-recommend`; lista com ícone das árvores + 1 toque pra
    aplicar). UX do auto-pick/ban também refeita: **chips de campeão com busca**
    (sheet) no lugar dos `<select>` nativos + badge de estado no botão.
-5. **Live API segmentada** (§7) — `playerlist`/`eventdata` p/ payloads menores.
-6. **Perfil na home + honra no pós-jogo** (§5, §6) — polimento.
+5. ~~**Live API segmentada** (§7)~~ — ✅ **feito** (`/live/feed` leve+rápido com
+   `gamestats`/`eventdata`/`playerlist`; `/live/stats` pesado em metade da
+   cadência; `/live` allgamedata vira fallback; builders puros compartilhados).
+6. ~~**Perfil na home + honra no pós-jogo** (§5, §6)~~ — ✅ **feito** (`/profile`:
+   ícone+nome+nível+honra na tela inicial; `/honor`: cédula de honra do pós-jogo
+   com 1 toque pra honrar aliado).

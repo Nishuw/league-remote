@@ -24,6 +24,269 @@ def _perk_icon(icon_path: str) -> str:
     return "https://raw.communitydragon.org/latest/plugins/rcp-be-lol-game-data/global/default/" + p
 
 
+# ----------------------------------------------------------------------
+# Live Client Data API: builders puros (compartilhados por /live, /live/stats
+# e /live/feed). Operam sobre os blocos crus (do allgamedata OU das sub-rotas
+# segmentadas), entao a mesma logica serve aos tres endpoints.
+# ----------------------------------------------------------------------
+
+# Traducao PT-BR dos tipos de dragao da Live API.
+_DRAGON_PT = {
+    "Fire": "Infernal", "Earth": "Montanha", "Water": "Oceano",
+    "Air": "Nuvem", "Hextech": "Hextech", "Chemtech": "Quimtech",
+    "Elder": "Ancião",
+}
+_MULTI_LABELS = {2: "Double Kill", 3: "Triple Kill", 4: "Quadra Kill", 5: "PENTA KILL"}
+
+
+def _live_meta(game: dict) -> dict:
+    """Extrai tempo/modo/mapa do bloco gameData (ou gamestats)."""
+    game_time = int(game.get("gameTime", 0) or 0)
+    mode = game.get("gameMode") or ""
+    return {
+        "game_time": game_time,
+        "minutes": max(game_time / 60.0, 1 / 60.0),  # evita divisao por zero
+        "mode": mode,
+        "map": game.get("mapName"),
+        # Visao (sentinelas) so faz sentido no Rift (CLASSIC); no ARAM nao ha wards.
+        "show_vision": mode == "CLASSIC",
+    }
+
+
+def _local_name(active) -> str:
+    """Nome do jogador local a partir do activePlayer (dict) ou activeplayername (str)."""
+    if isinstance(active, str):
+        return active.split("#")[0] if active else None
+    if not isinstance(active, dict):
+        return None
+    rid = active.get("riotId") or ""
+    return (
+        active.get("riotIdGameName")
+        or active.get("summonerName")
+        or (rid.split("#")[0] if rid else None)
+    )
+
+
+def _build_players(client, players_raw, local_name, minutes, show_vision):
+    """Processa allPlayers/playerlist -> (players, pindex, team_kills, team_gold)."""
+    name_to_id = {v: k for k, v in client.champ_map.items()}
+    pindex = {}
+    players = []
+    team_kills = {"ORDER": 0, "CHAOS": 0}
+    # Ouro investido em itens por time (proxy de vantagem economica -- a Live
+    # API nao expoe o ouro dos inimigos, mas o preco dos itens equipados sim).
+    team_gold = {"ORDER": 0, "CHAOS": 0}
+    for p in players_raw or []:
+        sc = p.get("scores", {}) or {}
+        team = p.get("team")
+        cname = p.get("championName")
+        cid = name_to_id.get(cname)
+        gname = p.get("riotIdGameName") or p.get("summonerName")
+        is_local = bool(local_name and gname == local_name)
+        info = {"team": team, "champion": cname, "champion_id": cid, "is_local": is_local}
+        # Indexa por todos os nomes possiveis, exato E em minusculas: os eventos
+        # da Live API as vezes usam casing diferente do playerlist (por isso o
+        # feed mostrava o nome cru, ex.: "rell", em vez do campeao).
+        for key in (p.get("riotIdGameName"), p.get("summonerName"), p.get("riotId"), cname):
+            if key:
+                pindex[key] = info
+                pindex[str(key).lower()] = info
+        k = int(sc.get("kills", 0) or 0)
+        d = int(sc.get("deaths", 0) or 0)
+        a = int(sc.get("assists", 0) or 0)
+        cs = int(sc.get("creepScore", 0) or 0)
+        if team in team_kills:
+            team_kills[team] += k
+
+        # Itens equipados (ordenados pelo slot) + ouro investido.
+        items = []
+        invested = 0
+        for it in sorted(p.get("items", []) or [], key=lambda i: i.get("slot", 0)):
+            iid = int(it.get("itemID", 0) or 0)
+            if not iid:
+                continue
+            invested += int(it.get("price", 0) or 0) * int(it.get("count", 1) or 1)
+            items.append({"id": iid, "icon": client.item_icon(iid)})
+        if team in team_gold:
+            team_gold[team] += invested
+
+        # Feiticos de invocador (icone) -- saber Flash/TP do inimigo ajuda.
+        spells = []
+        ss = p.get("summonerSpells", {}) or {}
+        for slot in ("summonerSpellOne", "summonerSpellTwo"):
+            nm = (ss.get(slot) or {}).get("displayName")
+            if nm:
+                spells.append({"name": nm, "icon": client.spell_icon_by_name(nm)})
+
+        players.append({
+            "name": gname,
+            "champion": cname,
+            "champion_id": cid,
+            "team": team,
+            "is_local": is_local,
+            "k": k, "d": d, "a": a,
+            "kda": round((k + a) / d, 1) if d else (k + a),
+            "cs": cs,
+            "csmin": round(cs / minutes, 1),
+            "vision": round(float(sc.get("wardScore", 0) or 0), 1),
+            "level": int(p.get("level", 0) or 0),
+            "dead": bool(p.get("isDead")),
+            "respawn": int(p.get("respawnTimer", 0) or 0),
+            "position": (p.get("position") or "").lower(),
+            "items": items,
+            "spells": spells,
+            "gold": invested,
+        })
+    return players, pindex, team_kills, team_gold
+
+
+def _empty_objectives() -> dict:
+    return {
+        "ORDER": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "grubs": 0, "inhibs": 0, "souls": []},
+        "CHAOS": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "grubs": 0, "inhibs": 0, "souls": []},
+    }
+
+
+def _team_of(name, pindex):
+    """Time (ORDER/CHAOS) do dono de um nome de evento.
+
+    Tenta o indice de jogadores (exato e em minusculas). Para nomes de
+    minions/estruturas/torres que nao sao jogadores, cai na analise dos tokens
+    do proprio nome (Order/Chaos, T1/T2, 100/200).
+    """
+    info = pindex.get(name) or pindex.get((name or "").lower()) or {}
+    if info.get("team") in ("ORDER", "CHAOS"):
+        return info["team"]
+    low = (name or "").lower()
+    if "order" in low or "_t1_" in low or "t100" in low or low.startswith("minion_t1"):
+        return "ORDER"
+    if "chaos" in low or "_t2_" in low or "t200" in low or low.startswith("minion_t2"):
+        return "CHAOS"
+    return None
+
+
+def _structure_owner(struct_name):
+    """Time DONO de uma torre/inibidor pelo nome (quem perdeu a estrutura)."""
+    s = (struct_name or "").lower()
+    if "_t1_" in s or "order" in s:
+        return "ORDER"
+    if "_t2_" in s or "chaos" in s:
+        return "CHAOS"
+    return None
+
+
+def _other(team):
+    return "CHAOS" if team == "ORDER" else ("ORDER" if team == "CHAOS" else None)
+
+
+def _process_events(events_raw, pindex):
+    """Eventos da partida -> (feed, objetivos, buff_baron, buff_elder).
+
+    A atribuicao por time prioriza o time do autor (KillerName) resolvido pelo
+    indice de jogadores; para torres/inibidores usa o dono da estrutura e
+    credita o time adversario (mais confiavel que so o last-hit).
+    """
+    def who(n):
+        return pindex.get(n) or pindex.get((n or "").lower()) or {}
+
+    def label(n):
+        w = who(n)
+        if w.get("is_local"):
+            return "Você"
+        champ = w.get("champion")
+        if champ:
+            return champ
+        # Sem campeao resolvido: usa o nome cru capitalizado (ex.: "rell" -> "Rell").
+        return (n[:1].upper() + n[1:]) if n else "?"
+
+    def actor(n):
+        w = who(n)
+        return {"name": label(n), "cid": w.get("champion_id"),
+                "team": w.get("team") or _team_of(n, pindex), "local": bool(w.get("is_local"))}
+
+    objectives = _empty_objectives()
+    buff_baron = buff_elder = None
+    feed = []
+    for ev in events_raw or []:
+        name = ev.get("EventName")
+        ki = actor(ev.get("KillerName"))
+        tm = ki.get("team")
+        t = int(ev.get("EventTime", 0) or 0)
+        stolen = " (roubado!)" if str(ev.get("Stolen")).lower() == "true" else ""
+        base = {"t": t, "a": ki["name"], "a_cid": ki["cid"], "team": tm, "local": ki["local"]}
+
+        if name == "ChampionKill":
+            vi = actor(ev.get("VictimName"))
+            assists = ev.get("Assisters") or []
+            feed.append({**base, "kind": "kill", "v": vi["name"], "v_cid": vi["cid"],
+                         "assists": len(assists),
+                         "local": ki["local"] or vi["local"]})
+        elif name == "Multikill":
+            streak = int(ev.get("KillStreak", 0) or 0)
+            feed.append({**base, "kind": "multi", "note": _MULTI_LABELS.get(streak, f"{streak} Kills")})
+        elif name == "FirstBlood":
+            ri = actor(ev.get("Recipient"))
+            feed.append({"t": t, "kind": "fb", "a": ri["name"], "a_cid": ri["cid"],
+                         "team": ri["team"], "local": ri["local"], "note": "First Blood"})
+        elif name == "TurretKilled":
+            ot = _other(_structure_owner(ev.get("TurretKilled"))) or tm
+            if ot in objectives:
+                objectives[ot]["towers"] += 1
+                feed.append({"t": t, "kind": "tower", "team": ot, "note": "Torre"})
+        elif name == "InhibKilled":
+            ot = _other(_structure_owner(ev.get("InhibKilled"))) or tm
+            if ot in objectives:
+                objectives[ot]["inhibs"] += 1
+        elif name == "DragonKill":
+            dt = ev.get("DragonType")
+            dt_pt = _DRAGON_PT.get(dt, dt or "")
+            if tm in objectives:
+                objectives[tm]["dragons"] += 1
+                if dt and dt != "Elder":
+                    objectives[tm]["souls"].append(dt_pt)
+            if dt == "Elder" and tm in objectives:
+                buff_elder = {"team": tm, "expires": t + 150}
+            feed.append({**base, "kind": "dragon", "note": f"Dragão {dt_pt}{stolen}".strip()})
+        elif name == "HeraldKill":
+            if tm in objectives:
+                objectives[tm]["heralds"] += 1
+            feed.append({**base, "kind": "herald", "note": f"Arauto{stolen}"})
+        elif name in ("HordeKill", "VoidgrubKill"):
+            if tm in objectives:
+                objectives[tm]["grubs"] += 1
+            feed.append({**base, "kind": "grub", "note": f"Larva do Vazio{stolen}"})
+        elif name == "BaronKill":
+            if tm in objectives:
+                objectives[tm]["barons"] += 1
+                buff_baron = {"team": tm, "expires": t + 180}
+            feed.append({**base, "kind": "baron", "note": f"Barão{stolen}"})
+        elif name == "Ace":
+            acer = actor(ev.get("Acer"))
+            feed.append({"t": t, "kind": "ace", "a": acer["name"], "a_cid": acer["cid"],
+                         "team": ev.get("AcingTeam"), "local": acer["local"], "note": "ACE!"})
+
+    feed.sort(key=lambda e: e.get("t", 0))
+    return feed, objectives, buff_baron, buff_elder
+
+
+def _finalize_objectives(objectives):
+    """Marca o progresso de alma (4 dragoes = alma)."""
+    for tk in ("ORDER", "CHAOS"):
+        d = objectives[tk]["dragons"]
+        objectives[tk]["soul_in"] = max(0, 4 - d) if d < 4 else 0
+        objectives[tk]["has_soul"] = d >= 4
+
+
+def _build_buffs(buff_baron, buff_elder, game_time):
+    """Buffs ativos (Barao/Anciao) que ainda nao expiraram, relativo ao gameTime."""
+    buffs = []
+    for kind, label_pt, b in (("baron", "Barão", buff_baron), ("elder", "Ancião", buff_elder)):
+        if b and b["expires"] > game_time:
+            buffs.append({"kind": kind, "label": label_pt, "team": b["team"],
+                          "remaining": b["expires"] - game_time})
+    return buffs
+
+
 def create_app(monitor: Monitor) -> Flask:
     """Cria e configura a aplicacao Flask para o monitor informado."""
     app = Flask(__name__)
@@ -84,9 +347,14 @@ def create_app(monitor: Monitor) -> Flask:
         if not isinstance(lob, dict):
             return jsonify({"in_lobby": False})
         gc = lob.get("gameConfig") or {}
+        local = lob.get("localMember") or {}
+        # So o lider do lobby pode iniciar a fila. Se eu entrei no saguao de
+        # outra pessoa (convidado), nao mostro o "Encontrar Partida".
+        is_leader = bool(local.get("isLeader"))
         return jsonify({
             "in_lobby": True,
             "queue_id": gc.get("queueId"),
+            "is_leader": is_leader,
             "can_start": bool(lob.get("canStartActivity")),
             "members": len(lob.get("members") or []),
         })
@@ -360,8 +628,9 @@ def create_app(monitor: Monitor) -> Flask:
         }[action]
         ok = fn(int(trade_id))
         labels = {"request": "Troca oferecida", "accept": "Troca aceita", "decline": "Troca recusada"}
-        monitor.set_last_action(labels[action] if ok else "Falha na troca")
-        return jsonify({"ok": ok})
+        msg = labels[action] if ok else f"Falha na troca ({client.last_status or '?'})"
+        monitor.set_last_action(msg)
+        return jsonify({"ok": ok, "status": client.last_status, "msg": msg})
 
     @app.route("/champ-list")
     def champ_list():
@@ -577,236 +846,215 @@ def create_app(monitor: Monitor) -> Flask:
             })
         return jsonify(out)
 
-    # Traducao PT-BR dos tipos de dragao da Live API.
-    _DRAGON_PT = {
-        "Fire": "Infernal", "Earth": "Montanha", "Water": "Oceano",
-        "Air": "Nuvem", "Hextech": "Hextech", "Chemtech": "Quimtech",
-        "Elder": "Ancião",
-    }
-
-    @app.route("/live")
-    def live():
-        data = client.get_live_game()
-        if not data:
-            return jsonify({"in_game": False})
-        game = data.get("gameData", {}) or {}
+    def _load_live_assets():
         client.load_champion_data()
         client.load_summoner_spells()
         client.load_item_data()
-        name_to_id = {v: k for k, v in client.champ_map.items()}
-        game_time = int(game.get("gameTime", 0) or 0)
-        minutes = max(game_time / 60.0, 1 / 60.0)  # evita divisao por zero
-        mode = game.get("gameMode") or ""
-        # Visao (sentinelas) so faz sentido no Rift (CLASSIC). No ARAM nao ha wards.
-        show_vision = mode == "CLASSIC"
 
-        # Identifica o jogador local pelo activePlayer (e "voce" no feed/lista).
+    @app.route("/live")
+    def live():
+        """Tudo de uma vez (allgamedata). Mantido como fallback/compatibilidade.
+
+        O painel ao vivo no celular usa as rotas segmentadas /live/feed e
+        /live/stats (payloads menores); esta agrega tudo numa so chamada.
+        """
+        data = client.get_live_game()
+        if not data:
+            return jsonify({"in_game": False})
+        _load_live_assets()
+        meta = _live_meta(data.get("gameData", {}) or {})
         active = data.get("activePlayer", {}) or {}
-        local_name = None
-        if isinstance(active, dict):
-            rid = active.get("riotId") or ""
-            local_name = (
-                active.get("riotIdGameName")
-                or active.get("summonerName")
-                or (rid.split("#")[0] if rid else None)
-            )
-
-        # Indice por nome (os eventos usam o nome do jogador, nao do campeao)
-        # para resolver autor/vitima -> time, campeao, icone e se e "voce".
-        pindex = {}
-        players = []
-        team_kills = {"ORDER": 0, "CHAOS": 0}
-        # Ouro investido em itens por time (proxy de vantagem economica -- a Live
-        # API nao expoe o ouro dos inimigos, mas o preco dos itens equipados sim).
-        team_gold = {"ORDER": 0, "CHAOS": 0}
-        for p in data.get("allPlayers", []) or []:
-            sc = p.get("scores", {}) or {}
-            team = p.get("team")
-            cname = p.get("championName")
-            cid = name_to_id.get(cname)
-            gname = p.get("riotIdGameName") or p.get("summonerName")
-            is_local = bool(local_name and gname == local_name)
-            info = {"team": team, "champion": cname, "champion_id": cid, "is_local": is_local}
-            for key in (p.get("riotIdGameName"), p.get("summonerName"), p.get("riotId"), cname):
-                if key:
-                    pindex[key] = info
-            k = int(sc.get("kills", 0) or 0)
-            d = int(sc.get("deaths", 0) or 0)
-            a = int(sc.get("assists", 0) or 0)
-            cs = int(sc.get("creepScore", 0) or 0)
-            if team in team_kills:
-                team_kills[team] += k
-
-            # Itens equipados (ordenados pelo slot) + ouro investido.
-            items = []
-            invested = 0
-            raw_items = sorted(p.get("items", []) or [], key=lambda i: i.get("slot", 0))
-            for it in raw_items:
-                iid = int(it.get("itemID", 0) or 0)
-                if not iid:
-                    continue
-                price = int(it.get("price", 0) or 0) * int(it.get("count", 1) or 1)
-                invested += price
-                items.append({"id": iid, "icon": client.item_icon(iid)})
-            if team in team_gold:
-                team_gold[team] += invested
-
-            # Feitiicos de invocador (icone) -- saber Flash/TP do inimigo ajuda.
-            spells = []
-            ss = p.get("summonerSpells", {}) or {}
-            for slot in ("summonerSpellOne", "summonerSpellTwo"):
-                nm = (ss.get(slot) or {}).get("displayName")
-                ic = client.spell_icon_by_name(nm)
-                if nm:
-                    spells.append({"name": nm, "icon": ic})
-
-            players.append({
-                "name": gname,
-                "champion": cname,
-                "champion_id": cid,
-                "team": team,
-                "is_local": is_local,
-                "k": k, "d": d, "a": a,
-                "kda": round((k + a) / d, 1) if d else (k + a),
-                "cs": cs,
-                "csmin": round(cs / minutes, 1),
-                "vision": round(float(sc.get("wardScore", 0) or 0), 1),
-                "level": int(p.get("level", 0) or 0),
-                "dead": bool(p.get("isDead")),
-                "respawn": int(p.get("respawnTimer", 0) or 0),
-                "position": (p.get("position") or "").lower(),
-                "items": items,
-                "spells": spells,
-                "gold": invested,
-            })
-
-        def who(n):
-            return pindex.get(n) or {}
-
-        def label(n):
-            """Rotulo do autor/vitima no feed: 'Você' para o jogador local."""
-            w = who(n)
-            if w.get("is_local"):
-                return "Você"
-            return w.get("champion") or n or "?"
-
-        def actor(n):
-            w = who(n)
-            return {"name": label(n), "cid": w.get("champion_id"), "team": w.get("team"), "local": bool(w.get("is_local"))}
-
-        # Objetivos e feed a partir dos eventos da partida.
-        objectives = {
-            "ORDER": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "grubs": 0, "inhibs": 0, "souls": []},
-            "CHAOS": {"towers": 0, "dragons": 0, "barons": 0, "heralds": 0, "grubs": 0, "inhibs": 0, "souls": []},
-        }
-        multi_labels = {2: "Double Kill", 3: "Triple Kill", 4: "Quadra Kill", 5: "PENTA KILL"}
-        # Buffs ativos (Barao 3min, Dragao Anciao 2:30). Guardamos o ultimo kill
-        # e calculamos quanto falta -- saber quando o buff inimigo cai e ouro puro.
-        buff_baron = None   # {"team", "expires"}
-        buff_elder = None
-        feed = []
-        for ev in (data.get("events", {}) or {}).get("Events", []) or []:
-            name = ev.get("EventName")
-            killer = ev.get("KillerName")
-            ki = actor(killer)
-            tm = ki.get("team")
-            t = int(ev.get("EventTime", 0) or 0)
-            base = {"t": t, "a": ki["name"], "a_cid": ki["cid"], "team": tm, "local": ki["local"]}
-
-            if name == "ChampionKill":
-                victim = ev.get("VictimName")
-                vi = actor(victim)
-                assists = ev.get("Assisters") or []
-                feed.append({**base, "kind": "kill", "v": vi["name"], "v_cid": vi["cid"],
-                             "note": f"+{len(assists)}" if assists else "",
-                             "local": ki["local"] or vi["local"]})
-            elif name == "Multikill":
-                streak = int(ev.get("KillStreak", 0) or 0)
-                feed.append({**base, "kind": "multi", "note": multi_labels.get(streak, f"{streak} Kills")})
-            elif name == "FirstBlood":
-                ri = actor(ev.get("Recipient"))
-                feed.append({"t": t, "kind": "fb", "a": ri["name"], "a_cid": ri["cid"],
-                             "team": ri["team"], "local": ri["local"], "note": "First Blood"})
-            elif name == "TurretKilled":
-                tk = ev.get("TurretKilled", "")
-                ot = "CHAOS" if "_T1_" in tk else ("ORDER" if "_T2_" in tk else None)
-                if ot:
-                    objectives[ot]["towers"] += 1
-            elif name == "InhibKilled":
-                ik = ev.get("InhibKilled", "")
-                ot = "CHAOS" if "_T1_" in ik else ("ORDER" if "_T2_" in ik else None)
-                if ot:
-                    objectives[ot]["inhibs"] += 1
-            elif name == "DragonKill":
-                dt = ev.get("DragonType")
-                dt_pt = _DRAGON_PT.get(dt, dt or "")
-                if tm in objectives:
-                    objectives[tm]["dragons"] += 1
-                    if dt and dt != "Elder":
-                        objectives[tm]["souls"].append(dt_pt)
-                if dt == "Elder" and tm in objectives:
-                    buff_elder = {"team": tm, "expires": t + 150}
-                stolen = " (roubado!)" if ev.get("Stolen") == "True" else ""
-                feed.append({**base, "kind": "dragon", "note": f"Dragão {dt_pt}{stolen}".strip()})
-            elif name == "HeraldKill":
-                if tm in objectives:
-                    objectives[tm]["heralds"] += 1
-                stolen = " (roubado!)" if ev.get("Stolen") == "True" else ""
-                feed.append({**base, "kind": "herald", "note": f"Arauto{stolen}"})
-            elif name in ("HordeKill", "VoidgrubKill"):
-                if tm in objectives:
-                    objectives[tm]["grubs"] += 1
-                feed.append({**base, "kind": "grub", "note": "Larva do Vazio"})
-            elif name == "BaronKill":
-                if tm in objectives:
-                    objectives[tm]["barons"] += 1
-                    buff_baron = {"team": tm, "expires": t + 180}
-                stolen = " (roubado!)" if ev.get("Stolen") == "True" else ""
-                feed.append({**base, "kind": "baron", "note": f"Barão{stolen}"})
-            elif name == "Ace":
-                acer = actor(ev.get("Acer"))
-                feed.append({"t": t, "kind": "ace", "a": acer["name"], "a_cid": acer["cid"],
-                             "team": ev.get("AcingTeam"), "local": acer["local"], "note": "ACE!"})
-
-        # A Live API normalmente ja vem em ordem cronologica, mas garantimos:
-        # ordena por tempo e mantem os 24 eventos mais recentes.
-        feed.sort(key=lambda e: e.get("t", 0))
-
-        gold = active.get("currentGold") if isinstance(active, dict) else None
-        active_level = active.get("level") if isinstance(active, dict) else None
-
-        # Buffs ativos: so retorna se ainda nao expirou (relativo ao gameTime).
-        buffs = []
-        for kind, label_pt, b in (("baron", "Barão", buff_baron), ("elder", "Ancião", buff_elder)):
-            if b and b["expires"] > game_time:
-                buffs.append({"kind": kind, "label": label_pt, "team": b["team"],
-                              "remaining": b["expires"] - game_time})
-
-        # Diferenca de ouro (investido em itens) ORDER - CHAOS.
-        gold_diff = team_gold["ORDER"] - team_gold["CHAOS"]
-
-        # Progresso da alma: 4 dragoes = alma. Marca quem esta a 1 do soul point.
-        for tk in ("ORDER", "CHAOS"):
-            d = objectives[tk]["dragons"]
-            objectives[tk]["soul_in"] = max(0, 4 - d) if d < 4 else 0
-            objectives[tk]["has_soul"] = d >= 4
-
+        players, pindex, team_kills, team_gold = _build_players(
+            client, data.get("allPlayers", []) or [], _local_name(active),
+            meta["minutes"], meta["show_vision"])
+        feed, objectives, bb, be = _process_events(
+            (data.get("events", {}) or {}).get("Events", []) or [], pindex)
+        _finalize_objectives(objectives)
+        gold = active.get("currentGold")
+        lvl = active.get("level")
         return jsonify({
             "in_game": True,
-            "game_time": game_time,
-            "mode": mode,
-            "map": game.get("mapName"),
-            "show_vision": show_vision,
-            "team_kills": team_kills,
-            "team_gold": team_gold,
-            "gold_diff": gold_diff,
+            "game_time": meta["game_time"], "mode": meta["mode"], "map": meta["map"],
+            "show_vision": meta["show_vision"],
+            "team_kills": team_kills, "team_gold": team_gold,
+            "gold_diff": team_gold["ORDER"] - team_gold["CHAOS"],
             "objectives": objectives,
-            "buffs": buffs,
+            "buffs": _build_buffs(bb, be, meta["game_time"]),
             "your_gold": int(gold) if isinstance(gold, (int, float)) else None,
-            "your_level": int(active_level) if isinstance(active_level, (int, float)) else None,
+            "your_level": int(lvl) if isinstance(lvl, (int, float)) else None,
             "feed": feed[-24:],
             "players": players,
         })
+
+    @app.route("/live/stats")
+    def live_stats():
+        """Bloco pesado (jogadores/itens/ouro), polleado mais devagar no celular."""
+        gs = client.get_live_gamestats()
+        if not gs:
+            return jsonify({"in_game": False})
+        _load_live_assets()
+        meta = _live_meta(gs)
+        active = client.get_live_active_player() or {}
+        players, _pindex, _tk, team_gold = _build_players(
+            client, client.get_live_playerlist() or [], _local_name(active),
+            meta["minutes"], meta["show_vision"])
+        gold = active.get("currentGold")
+        lvl = active.get("level")
+        return jsonify({
+            "in_game": True,
+            "game_time": meta["game_time"], "mode": meta["mode"], "map": meta["map"],
+            "show_vision": meta["show_vision"],
+            "team_gold": team_gold,
+            "gold_diff": team_gold["ORDER"] - team_gold["CHAOS"],
+            "your_gold": int(gold) if isinstance(gold, (int, float)) else None,
+            "your_level": int(lvl) if isinstance(lvl, (int, float)) else None,
+            "players": players,
+        })
+
+    @app.route("/live/feed")
+    def live_feed():
+        """Bloco leve (feed/objetivos/buffs), polleado rapido no celular.
+
+        Nao envia a lista pesada de jogadores -- so o resumo derivado dos
+        eventos. Usa o activeplayername (leve) para marcar 'Você' no feed.
+        """
+        gs = client.get_live_gamestats()
+        if not gs:
+            return jsonify({"in_game": False})
+        client.load_champion_data()
+        meta = _live_meta(gs)
+        # pindex (nome -> time/campeao/local) resolve autores e atribui objetivos.
+        _players, pindex, team_kills, _tg = _build_players(
+            client, client.get_live_playerlist() or [],
+            _local_name(client.get_live_active_name()), meta["minutes"], meta["show_vision"])
+        ev = client.get_live_eventdata() or {}
+        feed, objectives, bb, be = _process_events(ev.get("Events", []) or [], pindex)
+        _finalize_objectives(objectives)
+        return jsonify({
+            "in_game": True,
+            "game_time": meta["game_time"],
+            "mode": meta["mode"],
+            "team_kills": team_kills,
+            "objectives": objectives,
+            "buffs": _build_buffs(bb, be, meta["game_time"]),
+            "feed": feed[-24:],
+        })
+
+    @app.route("/debug/live")
+    def debug_live():
+        """Dump cru da Live API p/ diagnosticar contagem de objetivos/feed.
+
+        Mostra nomes dos jogadores, eventos crus e os objetivos ja computados,
+        pra comparar o que a LCU manda com o que o painel exibe.
+        """
+        gs = client.get_live_gamestats()
+        if not gs:
+            return jsonify({"in_game": False})
+        _load_live_assets()
+        meta = _live_meta(gs)
+        pl = client.get_live_playerlist() or []
+        _players, pindex, team_kills, _tg = _build_players(
+            client, pl, _local_name(client.get_live_active_name()),
+            meta["minutes"], meta["show_vision"])
+        events = (client.get_live_eventdata() or {}).get("Events", []) or []
+        feed, objectives, bb, be = _process_events(events, pindex)
+        _finalize_objectives(objectives)
+        return jsonify({
+            "mode": meta["mode"],
+            "player_names": [
+                {"riotIdGameName": p.get("riotIdGameName"), "summonerName": p.get("summonerName"),
+                 "championName": p.get("championName"), "team": p.get("team"),
+                 "items": len(p.get("items") or [])}
+                for p in pl
+            ],
+            "raw_events": events,
+            "computed_objectives": objectives,
+            "team_kills": team_kills,
+            "feed": feed,
+        })
+
+    # ------------------------------------------------------------------
+    # Perfil (home) + honra (pos-jogo)
+    # ------------------------------------------------------------------
+
+    _PROFILE_ICON = (
+        "https://raw.communitydragon.org/latest/plugins/"
+        "rcp-be-lol-game-data/global/default/v1/profile-icons/"
+    )
+
+    @app.route("/profile")
+    def profile():
+        """Resumo do perfil para a tela inicial: nome, nivel, icone e honra."""
+        summ = client.get_current_summoner() or {}
+        honor = client.get_honor_profile() or {}
+        icon_id = summ.get("profileIconId")
+        return jsonify({
+            "name": summ.get("gameName") or summ.get("displayName"),
+            "tagline": summ.get("tagLine"),
+            "level": summ.get("summonerLevel"),
+            "icon": (_PROFILE_ICON + str(icon_id) + ".jpg") if icon_id else "",
+            "honor_level": honor.get("honorLevel"),
+        })
+
+    @app.route("/honor", methods=["GET"])
+    def honor_get():
+        """Cedula de honra do fim de jogo: aliados elegiveis para honrar.
+
+        So existe logo apos a partida (PreEndOfGame/EndOfGame). Os campos da
+        cedula variam entre patches, entao varremos varias chaves possiveis.
+        """
+        ballot = client.get_honor_ballot()
+        if not isinstance(ballot, dict):
+            return jsonify({"available": False})
+        client.load_champion_data()
+        name_to_id = {v: k for k, v in client.champ_map.items()}
+        players = []
+        seen = set()
+        for key in ("eligibleAllies", "eligiblePlayers", "eligibleOpponents", "players"):
+            for p in ballot.get(key) or []:
+                if not isinstance(p, dict):
+                    continue
+                sid = p.get("summonerId")
+                puuid = p.get("puuid")
+                ident = sid or puuid or p.get("summonerName")
+                if not ident or ident in seen:
+                    continue
+                seen.add(ident)
+                cname = p.get("championName") or p.get("skinName")
+                cid = p.get("championId") or name_to_id.get(cname)
+                players.append({
+                    "summoner_id": sid,
+                    "puuid": puuid,
+                    "name": p.get("summonerName") or p.get("riotIdGameName") or "?",
+                    "champion": cname,
+                    "champion_id": cid,
+                })
+        votes = (ballot.get("votePool") or {}).get("votesRemaining")
+        if votes is None:
+            votes = ballot.get("numVotes")
+        return jsonify({
+            "available": True,
+            "game_id": ballot.get("gameId"),
+            "votes_remaining": votes,
+            "players": players,
+        })
+
+    @app.route("/honor", methods=["POST"])
+    def honor_post():
+        """Honra um jogador elegivel (1 toque no pos-jogo)."""
+        data = request.get_json(force=True, silent=True) or {}
+        sid = data.get("summonerId")
+        puuid = data.get("puuid")
+        if sid is None and not puuid:
+            return jsonify({"ok": False, "error": "jogador ausente"})
+        payload = {"honorCategory": data.get("category") or "HEART"}
+        if sid is not None:
+            payload["summonerId"] = int(sid)
+        if puuid:
+            payload["puuid"] = puuid
+        ok = client.honor_player(payload)
+        monitor.set_last_action("Honra enviada pelo celular" if ok else "Falha ao honrar")
+        return jsonify({"ok": ok})
 
     # ------------------------------------------------------------------
     # Config (auto-pick / auto-ban)

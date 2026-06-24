@@ -71,10 +71,14 @@ async function renderQueuePanel(force) {
   if (lob.in_lobby) {
     const q = QUEUES.find(x => x.id === lob.queue_id);
     const qname = q ? q.name : ("Fila " + (lob.queue_id || "?"));
+    // Só o líder do lobby pode iniciar a fila. Se entrei no saguão de outra
+    // pessoa, mostro um aviso em vez do botão "Encontrar Partida".
+    const startBtn = lob.is_leader
+      ? '<button class="qp-start" onclick="startSearch()">Encontrar Partida</button>'
+      : '<div class="qp-wait">aguardando o líder iniciar…</div>';
     el.innerHTML =
       '<div class="qp-head">Lobby: ' + qname + '</div>' +
-      '<div class="qp-actions">' +
-        '<button class="qp-start" onclick="startSearch()">Encontrar Partida</button>' +
+      '<div class="qp-actions">' + startBtn +
         '<button class="qp-leave" onclick="leaveLobby()">Sair do lobby</button>' +
       '</div>';
   } else {
@@ -142,8 +146,12 @@ function stopAlarm() {
 const PHASE_PT = {
   None: "No menu", Lobby: "No lobby", Matchmaking: "Na fila",
   ReadyCheck: "Partida encontrada!", ChampSelect: "Selecao de campeao",
-  InProgress: "Em partida", PreEndOfGame: "Fim de jogo", EndOfGame: "Fim de jogo",
+  InProgress: "Em partida", WaitingForStats: "Carregando resultado",
+  PreEndOfGame: "Fim de jogo", EndOfGame: "Fim de jogo",
 };
+
+// Fases de pos-jogo: mostramos a cedula de honra (honrar aliado pelo celular).
+const POST_GAME_PHASES = ["WaitingForStats", "PreEndOfGame", "EndOfGame"];
 
 const POS_PT = {
   top: "Top", jungle: "Jungle", middle: "Mid", bottom: "ADC", utility: "Suporte",
@@ -231,12 +239,13 @@ async function benchSwap(id) {
 }
 async function tradeAction(id, action) {
   try {
-    await fetch("/aram/trade", {
+    const j = await (await fetch("/aram/trade", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, action })
-    });
+    })).json();
+    toast(j.msg || (j.ok ? "ok" : "falhou"), j.ok);
     tick();
-  } catch (e) {}
+  } catch (e) { toast("erro de conexão", false); }
 }
 
 function tradeButtons(t) {
@@ -859,6 +868,48 @@ function liveTime(t) {
   return m + ":" + String(s).padStart(2, "0");
 }
 
+// Linha de comparação das 2 equipes: [Azul] rótulo [Vermelho], destacando o
+// lado que está na frente. `compare=false` desliga o destaque (ex.: ouro oculto).
+function cmpRow(label, a, b, render, compare) {
+  render = render || (x => (x == null ? 0 : x));
+  if (compare === undefined) compare = true;
+  const numeric = (typeof a === "number" && typeof b === "number");
+  const aw = (compare && numeric && a > b) ? " win" : "";
+  const bw = (compare && numeric && b > a) ? " win" : "";
+  return '<div class="cmp-row">' +
+    '<span class="cmp-v ally' + aw + '">' + render(a) + '</span>' +
+    '<span class="cmp-l">' + label + '</span>' +
+    '<span class="cmp-v enemy' + bw + '">' + render(b) + '</span>' +
+  '</div>';
+}
+
+// Placar das 2 equipes (ouro, abates, torres e — fora do ARAM — dragão, barão,
+// arauto e larvas). Tudo derivado de eventos por time, então funciona p/ ambos.
+function scoreboard(d, obj, tk) {
+  const isAram = d.mode === "ARAM";
+  const oO = obj.ORDER || {}, oC = obj.CHAOS || {};
+  const gO = (d.team_gold || {}).ORDER, gC = (d.team_gold || {}).CHAOS;
+  const goldFmt = (v) => (v ? (v / 1000).toFixed(1) + "k" : "—");
+  let h = '<div class="scoreboard">' +
+    '<div class="cmp-head"><span class="ally">Time Azul</span>' +
+    '<span class="cmp-vs">objetivos</span>' +
+    '<span class="enemy">Time Vermelho</span></div>';
+  h += cmpRow("Abates", tk.ORDER || 0, tk.CHAOS || 0);
+  // Ouro: só compara se ambos os times têm dado (inimigo às vezes vem oculto).
+  h += cmpRow("Ouro", gO, gC, goldFmt, !!(gO && gC));
+  h += cmpRow("Torres", oO.towers || 0, oC.towers || 0);
+  if (!isAram) {
+    h += cmpRow("Dragões", oO.dragons || 0, oC.dragons || 0);
+    h += cmpRow("Barão", oO.barons || 0, oC.barons || 0);
+    h += cmpRow("Arauto", oO.heralds || 0, oC.heralds || 0);
+    h += cmpRow("Larvas", oO.grubs || 0, oC.grubs || 0);
+    // Progresso de alma (4 dragões).
+    const soul = (o) => o.has_soul ? "ALMA" : (o.soul_in === 1 ? "alma em 1" : "");
+    if (soul(oO) || soul(oC)) h += cmpRow("Alma", soul(oO), soul(oC), null, false);
+  }
+  return h + '</div>';
+}
+
 // Uma linha do feed (estruturado): icones de autor/vitima + "Você ... (tempo)".
 function feedRow(e) {
   const teamCls = e.team === "ORDER" ? " ally" : (e.team === "CHAOS" ? " enemy" : "");
@@ -867,46 +918,64 @@ function feedRow(e) {
   let body;
   if (e.kind === "kill") {
     const vIcon = e.v_cid ? '<img class="lfeed-ic vic" src="' + champIcon(e.v_cid) + '" onerror="this.style.display=\'none\'">' : "";
-    body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> eliminou</span>' + vIcon +
-      '<span class="lfeed-txt">' + e.v + (e.note ? ' <span class="lfeed-note">' + e.note + '</span>' : '') + '</span>';
+    // "Autor ⚔ Vítima" com badge de assistências quando houver.
+    const assist = e.assists ? '<span class="lfeed-note">' + e.assists + ' assist</span>' : '';
+    body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> matou</span>' + vIcon +
+      '<span class="lfeed-txt">' + (e.v || '?') + assist + '</span>';
   } else if (e.kind === "multi" || e.kind === "ace") {
     body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> <span class="lfeed-big">' + e.note + '</span></span>';
   } else if (e.kind === "fb") {
     body = aIcon + '<span class="lfeed-txt"><span class="lfeed-big">' + e.note + '</span> · <b>' + e.a + '</b></span>';
+  } else if (e.kind === "tower") {
+    // Torre não tem autor confiável; mostra o time que derrubou.
+    const side = e.team === "ORDER" ? "Azul" : (e.team === "CHAOS" ? "Vermelho" : "");
+    body = '<span class="lfeed-txt"><span class="lfeed-obj">Torre</span>' + (side ? ' · ' + side : '') + '</span>';
   } else {
     body = aIcon + '<span class="lfeed-txt"><b>' + e.a + '</b> pegou <span class="lfeed-obj">' + (e.note || "objetivo") + '</span></span>';
   }
   return '<div class="lfeed-row' + teamCls + localCls + '"><span class="lfeed-time">' + liveTime(e.t) + '</span>' + body + '</div>';
 }
 
-async function loadLive() {
-  try {
-    const d = await (await fetch("/live")).json();
-    const live = document.getElementById("live");
-    if (!d.in_game) {
-      live.innerHTML = '<div class="loading">carregando dados da partida...</div>';
-      lastFeedSig = "";
-      lastStatSig = "";
-      return;
-    }
-    ensureLiveLayout();
+// Estado do painel ao vivo, alimentado por DOIS pollers segmentados:
+// - /live/feed  (leve, rapido):  feed, objetivos, buffs, abates por time
+// - /live/stats (pesado, lento): jogadores, itens, ouro
+// O render combina os dois; assim a lista pesada de jogadores so trafega na
+// cadencia lenta, enquanto o feed/objetivos acompanham a partida sem lag.
+let LV = { stats: null, feed: null };
+
+async function loadLiveFeed() {
+  try { LV.feed = await (await fetch("/live/feed")).json(); }
+  catch (e) { LV.feed = { in_game: false }; }
+  renderLive();
+}
+async function loadLiveStats() {
+  try { LV.stats = await (await fetch("/live/stats")).json(); }
+  catch (e) { LV.stats = { in_game: false }; }
+  renderLive();
+}
+
+function renderLive() {
+  const live = document.getElementById("live");
+  const s = LV.stats, f = LV.feed;
+  const inGame = (s && s.in_game) || (f && f.in_game);
+  if (!inGame) {
+    live.innerHTML = '<div class="loading">carregando dados da partida...</div>';
+    lastFeedSig = "";
+    lastStatSig = "";
+    return;
+  }
+  ensureLiveLayout();
+  // d combina os dois blocos. Objetivos/abates/buffs vêm do feed; jogadores/
+  // ouro vêm do stats. game_time prefere o feed (polleado mais rápido).
+  const d = Object.assign({}, f || {}, s || {});
+  if (f && f.game_time != null) d.game_time = f.game_time;
+
+  // ===== Bloco pesado: jogadores + cabeçalho dos times (precisa do /live/stats)
+  if (s && s.in_game && Array.isArray(s.players)) {
     const teams = { ORDER: [], CHAOS: [] };
     d.players.forEach(p => { (teams[p.team] || (teams[p.team] = [])).push(p); });
     const obj = d.objectives || {};
     const tk = d.team_kills || {};
-
-    const objLine = (t) => {
-      const o = obj[t] || {};
-      let s = '<span class="ob k">' + (tk[t] || 0) + ' abates</span>' +
-              '<span class="ob">' + (o.towers || 0) + ' torres</span>' +
-              '<span class="ob">' + (o.dragons || 0) + ' drag</span>';
-      if (o.grubs) s += '<span class="ob">' + o.grubs + ' larvas</span>';
-      if (o.heralds) s += '<span class="ob">' + o.heralds + ' arauto</span>';
-      if (o.barons) s += '<span class="ob bn">' + o.barons + ' barão</span>';
-      if (o.has_soul) s += '<span class="ob soul">ALMA</span>';
-      else if (o.soul_in === 1) s += '<span class="ob soul">alma em 1</span>';
-      return s;
-    };
 
     // Mini- icones de itens (cap 6 slots) + feitiicos de invocador.
     const itemRow = (p) => {
@@ -937,12 +1006,12 @@ async function loadLive() {
       '</div>';
     };
 
-    // Cabecalho do time: titulo + ouro investido + objetivos.
+    // Cabecalho do time: titulo + ouro do time (— se o ouro inimigo vier oculto).
     const teamBlock = (arr, cls, title, tkey) => {
       const tg = (d.team_gold || {})[tkey];
-      const goldTag = tg != null ? '<span class="ltgold">' + (tg / 1000).toFixed(1) + 'k</span>' : '';
+      const goldTag = '<span class="ltgold">' + (tg ? (tg / 1000).toFixed(1) + 'k' : '—') + '</span>';
       return '<div class="lteam ' + cls + '">' +
-        '<div class="lthead"><h4>' + title + goldTag + '</h4><div class="lobj">' + objLine(tkey) + '</div></div>' +
+        '<div class="lthead"><h4>' + title + goldTag + '</h4></div>' +
         arr.map(prow).join("") +
       '</div>';
     };
@@ -957,15 +1026,10 @@ async function loadLive() {
 
     let h = '<div class="lhead"><span class="gt">' + liveTime(d.game_time) + '</span>';
     if (d.map) h += '<span class="lmode">' + d.map + '</span>';
-    // Lead de ouro do time (proxy: ouro investido em itens).
-    if (d.gold_diff) {
-      const ahead = d.gold_diff > 0 ? "ally" : "enemy";
-      const who = d.gold_diff > 0 ? "Azul" : "Vermelho";
-      h += '<span class="lgdiff ' + ahead + '">' + who + ' +' + (Math.abs(d.gold_diff) / 1000).toFixed(1) + 'k</span>';
-    }
     if (d.your_gold != null) h += '<span class="lgold">' + d.your_gold + ' ouro</span>';
     h += '</div>';
     h += buffH;
+    h += scoreboard(d, obj, tk);  // placar das 2 equipes (ouro/torres/objetivos)
     h += teamBlock(teams.ORDER || [], "ally", "Time Azul", "ORDER");
     h += teamBlock(teams.CHAOS || [], "enemy", "Time Vermelho", "CHAOS");
 
@@ -977,8 +1041,12 @@ async function loadLive() {
       document.getElementById("live-stats").innerHTML = h;
     }
 
-    // Feed: so redesenha quando ha evento novo, para nao piscar nem perder scroll.
-    const feed = Array.isArray(d.feed) ? d.feed : [];
+  }
+
+  // ===== Feed de eventos (precisa do /live/feed) =====
+  if (f && f.in_game) {
+    // So redesenha quando ha evento novo, para nao piscar nem perder scroll.
+    const feed = Array.isArray(f.feed) ? f.feed : [];
     const sig = feed.map(e => (e.t || 0) + (e.kind || "") + (e.a || "") + (e.v || "") + (e.note || "")).join("|");
     if (sig !== lastFeedSig) {
       lastFeedSig = sig;
@@ -987,10 +1055,6 @@ async function loadLive() {
         ? '<div class="lfeed"><div class="lfeed-t">Eventos</div>' + feed.slice().reverse().map(feedRow).join("") + '</div>'
         : "";
     }
-  } catch (e) {
-    document.getElementById("live").innerHTML = '<div class="loading">sem dados ao vivo (ative a API no jogo)</div>';
-    lastFeedSig = "";
-    lastStatSig = "";
   }
 }
 
@@ -1002,11 +1066,25 @@ async function loadIdleExtra() {
   lastIdleLoad = now;
   const el = document.getElementById("idle-extra");
   try {
-    const [rk, hist] = await Promise.all([
+    const [prof, rk, hist] = await Promise.all([
+      (await fetch("/profile")).json(),
       (await fetch("/rank")).json(),
       (await fetch("/history")).json(),
     ]);
+    el.dataset.honor = "";
     let h = "";
+    // Perfil: ícone, nome, nível e nível de honra.
+    if (prof && prof.name) {
+      h += '<div class="profile-box">' +
+        (prof.icon ? '<img class="pf-icon" src="' + prof.icon + '" onerror="this.style.visibility=\'hidden\'">' : '') +
+        '<div class="pf-meta">' +
+          '<div class="pf-name">' + prof.name +
+            (prof.tagline ? '<span class="pf-tag">#' + prof.tagline + '</span>' : '') + '</div>' +
+          '<div class="pf-sub">Nível ' + (prof.level || '?') +
+            (prof.honor_level ? ' · <span class="pf-honor">Honra ' + prof.honor_level + '</span>' : '') +
+          '</div>' +
+        '</div></div>';
+    }
     const card = (q, lbl) => q ?
       '<div class="rank-card"><div class="q">' + lbl + '</div><div class="t">' + q.tier + '</div>' +
       '<div class="wl">' + q.lp + ' PDL &middot; ' + q.wins + 'V/' + q.losses + 'D</div></div>' : "";
@@ -1025,6 +1103,58 @@ async function loadIdleExtra() {
   } catch (e) {
     el.innerHTML = "";
   }
+}
+
+// ---- Honra no pos-jogo ----
+// A cedula (/honor) so existe logo apos a partida. Mostra os aliados elegiveis
+// como cartas tocaveis; 1 toque honra o jogador escolhido.
+let lastHonorLoad = 0;
+async function loadHonor() {
+  const el = document.getElementById("idle-extra");
+  const now = Date.now();
+  if (el.dataset.honor === "1" && now - lastHonorLoad < 4000) return;
+  lastHonorLoad = now;
+  let d = { available: false };
+  try { d = await (await fetch("/honor")).json(); } catch (e) {}
+  if (!d.available || !Array.isArray(d.players) || !d.players.length) {
+    el.dataset.honor = "";
+    el.innerHTML = '<div class="honor-box"><div class="htitle">Honra</div>' +
+      '<div class="muted">Sem honra disponível agora.</div></div>';
+    return;
+  }
+  el.dataset.honor = "1";
+  window.__honor = d.players;
+  const votes = d.votes_remaining;
+  el.innerHTML = '<div class="honor-box">' +
+    '<div class="htitle">Honrar aliado' +
+      (votes != null ? ' <span class="hvotes">' + votes + ' voto(s)</span>' : '') + '</div>' +
+    '<div class="honor-grid">' +
+    d.players.map((p, i) =>
+      '<button class="honoropt" onclick="sendHonor(' + i + ')">' +
+        (p.champion_id
+          ? '<img src="' + champIcon(p.champion_id) + '" onerror="this.style.visibility=\'hidden\'">'
+          : '<div class="noimg"></div>') +
+        '<span class="hname">' + (p.champion || p.name || "?") + '</span>' +
+        (p.name && p.champion ? '<span class="hsumm">' + p.name + '</span>' : '') +
+      '</button>'
+    ).join("") + '</div></div>';
+}
+async function sendHonor(i) {
+  const p = (window.__honor || [])[i];
+  if (!p) return;
+  try {
+    const j = await (await fetch("/honor", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ summonerId: p.summoner_id, puuid: p.puuid })
+    })).json();
+    toast(j.ok ? ("Honra enviada: " + (p.champion || p.name || "")) : "Falha ao honrar", j.ok);
+    if (j.ok) { lastHonorLoad = 0; el_honor_refresh(); }
+  } catch (e) { toast("erro de conexão", false); }
+}
+function el_honor_refresh() {
+  const el = document.getElementById("idle-extra");
+  if (el) el.dataset.honor = "";
+  loadHonor();
 }
 
 // ---- Config auto-pick/ban ----
@@ -1247,6 +1377,19 @@ async function tick() {
       live.style.display = "block";
       startLivePoll();
       phaseEl.classList.remove("flash");
+    } else if (POST_GAME_PHASES.includes(s.phase)) {
+      // Pos-jogo: honrar aliado pelo celular (cedula de honra).
+      stopAlarm();
+      hideAll();
+      resetChampLayout();
+      card.classList.remove("wide");
+      content.style.display = "block";
+      queue.style.display = "none";
+      label.style.display = "none";
+      leave.style.display = "none";
+      { const qp = document.getElementById("queue-panel"); if (qp) qp.innerHTML = ""; }
+      phaseEl.classList.remove("flash");
+      loadHonor();
     } else if (s.player_response === "Accepted") {
       stopAlarm();
       hideAll();
@@ -1297,12 +1440,19 @@ async function tick() {
 // farm/KDA fica regular em vez de "as vezes rapido, as vezes nao".
 let liveTimer = null;
 let livePolling = false;
+let liveTick = 0;
 function startLivePoll() {
   if (livePolling) return;
   livePolling = true;
+  liveTick = 0;
   const loop = async () => {
     if (!livePolling) return;
-    await loadLive();
+    // Feed (leve) toda iteração; stats (pesado) em metade da cadência -- a lista
+    // de jogadores trafega menos, o feed/objetivos acompanham a partida sem lag.
+    const jobs = [loadLiveFeed()];
+    if (liveTick % 2 === 0) jobs.push(loadLiveStats());
+    liveTick++;
+    await Promise.all(jobs);
     if (livePolling) liveTimer = setTimeout(loop, LIVE_POLL_MS);
   };
   loop(); // busca imediata ao entrar na partida
@@ -1312,6 +1462,7 @@ function stopLivePoll() {
   if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
   if (buffTicker) { clearInterval(buffTicker); buffTicker = null; }
   lastStatSig = "";
+  LV = { stats: null, feed: null };
 }
 
 // Tick adaptativo: o backend ja recebe os eventos da LCU em tempo real (via

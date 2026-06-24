@@ -190,6 +190,44 @@ Motivos da separação:
   (igual ao feed). Sem isso, eram 60+ `<img>` de itens recriadas a cada 800ms —
   travava o celular. O countdown dos buffs atualiza à parte, só o texto.
 
+### Live API segmentada (payloads menores no celular)
+- **Problema:** o painel ao vivo puxava o `allgamedata` inteiro a cada ~800ms e
+  reenviava a lista pesada de jogadores (10 jogadores × itens × feitiços ×
+  ícones) **em todo poll**, mesmo quando só o feed mudava. No celular isso é
+  tráfego e parse desnecessários.
+- **Como ficou:** quebrei em **duas rotas segmentadas** que o front pola em
+  cadências diferentes:
+  - **`/live/feed`** (leve, rápido — 800ms): só o que vem dos **eventos** —
+    feed, objetivos, buffs (Barão/Ancião) e abates por time. Não manda a lista
+    de jogadores. Usa `gamestats` + `eventdata` + `playerlist` (só pra mapear
+    autor→time/campeão) + `activeplayername` (leve, pra marcar "Você").
+  - **`/live/stats`** (pesado, metade da cadência — ~1,6s): jogadores, itens,
+    feitiços, CS/KDA/visão e **ouro investido por time**. Usa `gamestats` +
+    `playerlist` + `activeplayer` (ouro/nível).
+  - **`/live`** (allgamedata) continua como **fallback/compatibilidade** numa só
+    chamada.
+- **No backend** extraí a lógica do `/live` para **funções puras**
+  (`_build_players`, `_process_events`, `_live_meta`, `_build_buffs`,
+  `_finalize_objectives`) que operam sobre os blocos crus — então as três rotas
+  compartilham exatamente o mesmo processamento (testável sem cliente do LoL).
+- **No front** o poller virou **dois loops auto-agendados** (`loadLiveFeed` toda
+  iteração, `loadLiveStats` em metade) com **render desacoplado** (`renderLive`
+  combina o último feed + último stats). A lista pesada de jogadores passa a
+  trafegar ~metade das vezes; o feed/objetivos seguem acompanhando a partida sem
+  lag. O diff de DOM por assinatura (feed/stats) continua valendo.
+
+### Perfil na home + honra no pós-jogo
+- **Perfil na tela inicial:** card com **ícone, nome (#tag), nível e nível de
+  honra** (`/lol-summoner/v1/current-summoner` + `/lol-honor-v2/v1/profile`),
+  acima do elo e do histórico. Rota `/profile`.
+- **Honrar aliado pelo celular:** ao acabar a partida (fases `WaitingForStats`,
+  `PreEndOfGame`, `EndOfGame`) mostro a **cédula de honra**
+  (`GET /lol-honor-v2/v1/ballot`) como cartas tocáveis (ícone + campeão + nome);
+  1 toque honra (`POST /lol-honor-v2/v1/honor-player`). Rota `/honor` (GET lista
+  os elegíveis, POST honra). A leitura da cédula é **defensiva** — os campos
+  mudam entre patches, então varro várias chaves (`eligibleAllies`,
+  `eligiblePlayers`, ...) e mando `summonerId` + `puuid` no POST.
+
 ### UI/UX mobile
 - Tema escuro inspirado no visual Hextech/LoL, fontes **Cinzel + Inter**.
 - Mobile-first: `viewport-fit=cover`, `safe-area-inset`, `100dvh`, alvos de
@@ -284,6 +322,36 @@ Motivos da separação:
   um throttle por tempo (`now - lastLiveLoad < 1000` às vezes dava 999ms e
   pulava). Troquei por uma **trava de requisição em andamento** (`liveLoading`)
   com `finally`, então a cada 1s sempre busca de verdade.
+- **Ajustes pós-teste do painel ao vivo + lobby/troca (v1.1.1):**
+  - **"Encontrar Partida" no saguão dos outros**: o `/lobby` agora expõe
+    `is_leader` (de `localMember.isLeader`). Se entrei no lobby de outra pessoa,
+    o front esconde o botão e mostra "aguardando o líder iniciar…".
+  - **Trocas no ARAM "não funcionavam"**: centralizei `request/accept/decline`
+    em `_trade()` no client, mandando `json={}` (alguns endpoints da LCU
+    recusam POST sem corpo), guardando `last_status` e logando o código. A rota
+    `/aram/trade` devolve `{ok, status, msg}` e o front mostra um **toast** com
+    o erro — assim dá pra ver na hora se a LCU respondeu 409/404/etc.
+  - **Feed "rell eliminou +4"**: dois problemas. (1) Casing — os eventos da
+    Live API às vezes vêm com nome em caixa diferente do `playerlist`, então o
+    `pindex` virou **case-insensitive** (indexo exato e em minúsculas) e o nome
+    cru, quando não resolve, é capitalizado. (2) Texto — agora é **"Autor matou
+    Vítima"** com ícones dos dois e um selo separado "N assist".
+  - **Contagem de torres**: a torre é creditada ao **time adversário ao dono da
+    estrutura** (`Turret_T1_*` é do azul → ponto do vermelho), via
+    `_structure_owner` + `_other`, com fallback no time do autor.
+  - **Objetivos por time mais robustos**: `_team_of()` resolve o time pelo
+    `pindex` e, p/ minions/estruturas, pelos tokens do nome (Order/Chaos,
+    T1/T2, 100/200). Dragão/barão/arauto/larvas são creditados ao time do autor.
+  - **Placar das 2 equipes**: troquei as tags soltas por um **scoreboard**
+    comparando Azul × Vermelho (abates, ouro, torres e, fora do ARAM,
+    dragões/barão/arauto/larvas/alma), destacando quem está na frente.
+  - **Ouro inimigo oculto**: a Live API às vezes zera os itens do time inimigo.
+    Em vez de mostrar "0.0k" (enganoso), mostro "—" e só comparo ouro quando os
+    **dois** times têm dado.
+  - **ARAM**: escondo dragão/barão/arauto/larvas/alma (não existem no Abismo);
+    mantenho abates, torres e ouro.
+  - **`/debug/live`**: rota nova que despeja nomes dos jogadores, eventos crus e
+    os objetivos já computados — pra diagnosticar divergências sem adivinhar.
 
 ## O que ainda quero explorar
 
